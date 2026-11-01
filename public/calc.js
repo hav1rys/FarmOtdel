@@ -58,12 +58,66 @@ export const ruleByCode = (rules, code) => allRuleItems(rules).find((i) => i.cod
 // Пункт, который выдаётся сам за неоплату взноса
 export const autoRules = (rules) => allRuleItems(rules).filter((i) => i.autoDays > 0);
 
+// Порядок здесь — порядок групп в тексте состава: старший состав сверху
 export const MEMBER_ROLES = {
-  member: 'Участник',
   cur: 'Cur. Farm',
-  dhead: 'D.Head Farm',
   head: 'Head Farm',
+  dhead: 'D.Head Farm',
+  member: 'Участник',
+  trainee: 'Стажёр',
 };
+
+// Настройки вкладки «Состав»: должности и колонки таблицы (они же — на скриншоте)
+export const ROSTER_COLUMNS = {
+  status: 'Статус',
+  owe: 'К оплате (под статусом)',
+  paidUntil: 'Оплачено до',
+  lastPay: 'Посл. оплата',
+  fines: 'Штрафы',
+  inDept: 'В отделе',
+  discordId: 'Discord ID под именем',
+};
+export const DEFAULT_ROSTER = {
+  roles: Object.entries(MEMBER_ROLES).map(([id, label]) => ({ id, label })),
+  columns: Object.fromEntries(Object.keys(ROSTER_COLUMNS).map((k) => [k, true])),
+};
+
+// Текст напоминания должникам. В фигурных скобках — подстановки
+export const DEFAULT_REMINDER = {
+  header: '**Напоминание об оплате взноса**',
+  line: '{mention} — не оплачено с {since}, к оплате {amount}',
+  lineToday: '{mention} — оплата сегодня, к оплате {amount}',
+  footer: 'За неуплату — {sanction} (п. {rule}), штраф выдаётся через {auto_days} дн. неоплаты.',
+};
+export const REMINDER_VARS = {
+  header: { date: 'сегодняшняя дата', count: 'сколько должников' },
+  line: {
+    mention: 'упоминание <@id> (или имя, если ID нет)', name: 'имя', tag: '@тег', since: 'с какого числа не оплачено',
+    days: 'сколько дней не оплачено', amount: 'сколько внести', pay_days: 'на сколько дней эта сумма',
+  },
+  footer: { sanction: 'санкция пункта за неуплату', rule: 'номер пункта', auto_days: 'через сколько дней автоштраф', date: 'сегодняшняя дата' },
+};
+
+// Текст состава для Discord: группы по должностям в порядке из настроек
+export const DEFAULT_LINEUP = {
+  header: '**Состав отдела Farm** — {count} чел.',
+  group: '**{role}** ({count})',
+  line: '{mention}',
+  footer: '-# Обновлено {date}',
+  showEmpty: false,
+};
+export const LINEUP_VARS = {
+  header: { count: 'сколько всего в отделе', date: 'сегодняшняя дата' },
+  group: { role: 'название должности', count: 'сколько человек на должности' },
+  line: {
+    mention: 'упоминание <@id> (или имя, если ID нет)', name: 'имя', tag: '@тег', role: 'должность',
+    joined: 'дата вступления', days_in: 'сколько дней в отделе', paid_until: 'оплачено до',
+  },
+  footer: { count: 'сколько всего в отделе', date: 'сегодняшняя дата' },
+};
+
+// Подставляет {имя} из vars; неизвестные подстановки оставляет как есть
+export const fillTemplate = (text, vars) => String(text || '').replace(/\{(\w+)\}/g, (m, k) => (k in vars ? String(vars[k]) : m));
 
 // ---------- даты: храним как 'YYYY-MM-DD', считаем в днях от эпохи ----------
 

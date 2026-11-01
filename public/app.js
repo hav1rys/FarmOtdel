@@ -2,6 +2,7 @@ import {
   MEMBER_ROLES, DEFAULT_SETTINGS, DEFAULT_RULES, CHIP_TYPES, dayNum, isoOf, todayNum, weekStart,
   costFor, daysFor, minPayFor, memberState, buildRoster, weekReport, chipLabel, optionLabel, optionAmount,
   allRuleItems, ruleByCode, autoRules, blacklistActive,
+  DEFAULT_REMINDER, DEFAULT_ROSTER, ROSTER_COLUMNS, REMINDER_VARS, DEFAULT_LINEUP, LINEUP_VARS, fillTemplate,
 } from '/calc.js';
 
 const RANK = { member: 0, viewer: 1, editor: 2, admin: 3, owner: 4 };
@@ -16,6 +17,8 @@ const TABS = [
   { id: 'rules', label: 'Цены и правила' },
   { id: 'access', label: 'Доступ', min: 'admin' },
   { id: 'audit', label: 'Журнал', min: 'admin' },
+  { id: 'templates', label: 'Заготовки' },
+  { id: 'settings', label: 'Настройки', min: 'admin' },
 ];
 
 const S = {
@@ -38,8 +41,11 @@ function fd(v) {
 }
 const fdShort = (v) => fd(v).slice(0, 5);
 const parseMoney = (s) => parseInt(String(s).replace(/\D/g, ''), 10) || 0;
-const settings = () => ({ ...DEFAULT_SETTINGS, rules: DEFAULT_RULES, ...(S.data?.settings || {}) });
+const settings = () => ({ ...DEFAULT_SETTINGS, rules: DEFAULT_RULES, reminder: DEFAULT_REMINDER, lineup: DEFAULT_LINEUP, roster: DEFAULT_ROSTER, ...(S.data?.settings || {}) });
 const rules = () => settings().rules;
+const roles = () => settings().roster.roles;
+const roleLabel = (id) => roles().find((r) => r.id === id)?.label || MEMBER_ROLES[id] || id;
+const cols = () => settings().roster.columns;
 const can = (min) => S.me && RANK[S.me.role] >= RANK[min];
 const memberById = (id) => S.data.members.find((m) => m.id === id);
 const days = (n) => `${n} дн.`;
@@ -213,7 +219,10 @@ function appView() {
 
   const tabs = TABS.filter((tb) => !tb.min || can(tb.min));
   const badge = { fines: overdueFines.length, roster: due.length };
-  const views = { roster: rosterTab, payments: paymentsTab, fines: finesTab, blacklist: blacklistTab, vacations: vacationsTab, week: weekTab, rules: rulesTab, access: accessTab, audit: auditTab };
+  const views = {
+    roster: rosterTab, payments: paymentsTab, fines: finesTab, blacklist: blacklistTab, vacations: vacationsTab, week: weekTab,
+    rules: rulesTab, access: accessTab, audit: auditTab, templates: templatesTab, settings: settingsTab,
+  };
 
   return `
     ${header()}
@@ -247,15 +256,34 @@ function statusPill(r) {
 
 const paidUntilText = (r) => (r.member.exempt ? '∞' : r.paidUntil == null ? 'нет оплат' : fd(r.paidUntil));
 
-function discordLine(m) {
+function discordLine(m, showId = cols().discordId) {
   if (!m.discord) return '';
   if (m.discordMissing) return `<span class="bad-text">ID не найден в Discord</span>`;
-  return `<span>${m.discordTag ? `<span class="tag-at">@${esc(m.discordTag)}</span> · ` : ''}${esc(m.discord)}</span>`;
+  const tag = m.discordTag ? `<span class="tag-at">@${esc(m.discordTag)}</span>` : '';
+  if (!showId) return tag ? `<span>${tag}</span>` : '';
+  return `<span>${tag ? `${tag} · ` : ''}${esc(m.discord)}</span>`;
 }
 
-function memberCell(m) {
-  return `<div class="who"><b>${esc(m.name)}${m.role !== 'member' ? ` <span class="role">${esc(MEMBER_ROLES[m.role] || m.role)}</span>` : ''}</b>${discordLine(m)}</div>`;
+function memberCell(m, showId) {
+  return `<div class="who"><b>${esc(m.name)}${m.role !== 'member' ? ` <span class="role">${esc(roleLabel(m.role))}</span>` : ''}</b>${discordLine(m, showId)}</div>`;
 }
+
+// Колонки состава — общие для вкладки и скриншота, набор задаётся в «Настройках»
+const ROSTER_CELLS = [
+  { key: 'status', th: 'Статус', td: (r, c) => `<td>${statusPill(r)}${c.owe && r.owe ? `<div class="small muted owe">к оплате ${money(r.owe.amount)}</div>` : ''}</td>` },
+  { key: 'paidUntil', th: 'Оплачено до', td: (r) => `<td class="num">${paidUntilText(r)}</td>` },
+  { key: 'lastPay', th: 'Посл. оплата', cls: 'hide-sm', td: (r, c, shot) => `<td class="num ${shot ? '' : 'hide-sm'}">${r.lastPay ? `${fd(r.lastPay.date)} <span class="muted">· ${money(r.lastPay.amount)}</span>` : '—'}</td>` },
+  { key: 'fines', th: 'Штрафы', cls: 'r', td: (r) => `<td class="num r">${r.unpaidFinesSum ? `<span class="pill ${r.overdueFines.length ? 'bad' : 'warn'}">${money(r.unpaidFinesSum)}</span>` : '<span class="muted">—</span>'}</td>` },
+  { key: 'inDept', th: 'В отделе', cls: 'r hide-sm', td: (r, c, shot) => `<td class="num r ${shot ? '' : 'hide-sm'}">${r.daysInDept == null ? '—' : days(r.daysInDept)}</td>` },
+];
+const rosterHead = (shot) => {
+  const c = cols();
+  return `<th>Участник</th>${ROSTER_CELLS.filter((x) => c[x.key]).map((x) => `<th class="${shot ? (x.cls || '').replace('hide-sm', '') : x.cls || ''}">${x.th}</th>`).join('')}`;
+};
+const rosterCells = (r, shot) => {
+  const c = cols();
+  return `<td>${memberCell(r.member, shot ? false : c.discordId)}</td>${ROSTER_CELLS.filter((x) => c[x.key]).map((x) => x.td(r, c, shot)).join('')}`;
+};
 
 function memberAvatar(m, size = 44) {
   return avatarHtml(m.discord, m.discordAvatar, m.discordName || m.name, size);
@@ -283,21 +311,17 @@ function rosterTab(roster) {
       <input class="input" id="roster-search" type="search" placeholder="Поиск: имя, @тег или Discord ID" value="${esc(S.search)}">
       <span class="grow"></span>
       <button class="btn" data-act="calc">Калькулятор</button>
+      <button class="btn" data-act="lineup">Состав для Discord</button>
       <button class="btn" data-act="remind">Напоминание должникам</button>
       ${rows.length ? '<button class="btn" data-act="shot" data-kind="roster">Скриншот</button>' : ''}
       ${edit ? '<button class="btn" data-act="new-member">+ Участник</button><button class="btn primary" data-act="new-payment">+ Оплата</button>' : ''}
     </div>
     <div class="card table-wrap">
       ${rows.length ? `<table>
-        <thead><tr><th>Участник</th><th>Статус</th><th>Оплачено до</th><th class="hide-sm">Посл. оплата</th><th class="r">Штрафы</th><th class="r hide-sm">В отделе</th>${edit ? '<th></th>' : ''}</tr></thead>
+        <thead><tr>${rosterHead(false)}${edit ? '<th></th>' : ''}</tr></thead>
         <tbody>${rows.map((r) => `
           <tr class="click ${r.member.left ? 'is-left' : ''}" data-act="open-member" data-id="${r.member.id}">
-            <td>${memberCell(r.member)}</td>
-            <td>${statusPill(r)}${r.owe ? `<div class="small muted owe">к оплате ${money(r.owe.amount)}</div>` : ''}</td>
-            <td class="num">${paidUntilText(r)}</td>
-            <td class="num hide-sm">${r.lastPay ? `${fd(r.lastPay.date)} <span class="muted">· ${money(r.lastPay.amount)}</span>` : '—'}</td>
-            <td class="num r">${r.unpaidFinesSum ? `<span class="pill ${r.overdueFines.length ? 'bad' : 'warn'}">${money(r.unpaidFinesSum)}</span>` : '<span class="muted">—</span>'}</td>
-            <td class="num r hide-sm">${r.daysInDept == null ? '—' : days(r.daysInDept)}</td>
+            ${rosterCells(r, false)}
             ${edit ? `<td class="r">${!r.member.left && !r.member.exempt ? `<button class="btn sm" data-act="new-payment" data-member="${r.member.id}">Оплата</button>` : ''}</td>` : ''}
           </tr>`).join('')}
         </tbody></table>` : emptyState(S.data.members.length ? 'Никого не найдено' : 'В составе пока никого нет', S.data.members.length ? 'Измените фильтр или поиск.' : 'Добавьте первого участника: имя, Discord ID и дату вступления.', edit && !S.data.members.length ? '<button class="btn primary" data-act="new-member">+ Добавить участника</button>' : '')}
@@ -672,7 +696,7 @@ function drawerView(roster) {
         <div style="flex:1;display:grid;gap:6px;min-width:0">
           <h2>${esc(m.name)}</h2>
           ${m.discordTag ? `<span class="small"><span class="tag-at">@${esc(m.discordTag)}</span>${m.discordName && m.discordName !== m.discordTag ? ` <span class="muted">· ${esc(m.discordName)}</span>` : ''}</span>` : ''}
-          <div>${statusPill(r)} ${m.role !== 'member' ? `<span class="pill staff">${esc(MEMBER_ROLES[m.role] || m.role)}</span>` : ''}</div>
+          <div>${statusPill(r)} ${m.role !== 'member' ? `<span class="pill staff">${esc(roleLabel(m.role))}</span>` : ''}</div>
         </div>
         <button class="btn ghost" data-act="close-drawer" aria-label="Закрыть">✕</button>
       </div>
@@ -829,7 +853,7 @@ function memberForm(m = null) {
     <label class="field">Имя Фамилия<input id="f-name" required value="${esc(m?.name)}" placeholder="Pan Asteryan"></label>
     <div class="grid2">
       <label class="field">Discord ID<input id="f-discord" inputmode="numeric" value="${esc(m?.discord)}" placeholder="946385586904764457"><span id="f-discord-check" class="small"></span></label>
-      <label class="field">Должность<select id="f-role">${Object.entries(MEMBER_ROLES).map(([k, l]) => `<option value="${k}" ${(m?.role || 'member') === k ? 'selected' : ''}>${l}</option>`).join('')}</select></label>
+      <label class="field">Должность<select id="f-role">${roles().map((r) => `<option value="${esc(r.id)}" ${(m?.role || 'member') === r.id ? 'selected' : ''}>${esc(r.label)}</option>`).join('')}</select></label>
     </div>
     <div class="grid2">
       <label class="field">Вступил в отдел<input id="f-joined" type="date" value="${esc(m?.joined || todayIso())}"></label>
@@ -1232,18 +1256,32 @@ function calcModal() {
 }
 
 // ----- напоминание должникам -----
+// Подстановки для одной строки должника
+const debtorVars = (r) => ({
+  mention: r.member.discord ? `<@${r.member.discord}>` : r.member.name,
+  name: r.member.name,
+  tag: r.member.discordTag ? `@${r.member.discordTag}` : r.member.name,
+  since: fdShort(r.owe.since),
+  days: r.owe.days,
+  amount: money(r.owe.amount),
+  pay_days: r.owe.payDays,
+});
+
+// Собирает текст напоминания по шаблону из «Настроек»; items — [{ today, vars }]
+function buildReminder(tpl, items) {
+  const npr = nonPayRule();
+  const header = fillTemplate(tpl.header, { date: fdShort(T()), count: items.length });
+  const lines = items.map((it) => fillTemplate(it.today && tpl.lineToday.trim() ? tpl.lineToday : tpl.line, it.vars));
+  const footer = npr ? fillTemplate(tpl.footer, { sanction: optionLabel(npr.options[0]), rule: npr.code, auto_days: npr.autoDays || 0, date: fdShort(T()) }) : '';
+  let text = [header.trim() ? header : null, lines.join('\n')].filter((x) => x != null).join('\n');
+  if (footer.trim()) text += `\n\n${footer}`;
+  return text;
+}
+
 function remindData() {
   const roster = buildRoster(S.data, settings(), T());
   const debtors = roster.filter((r) => !r.member.left && r.owe);
-  const lines = debtors.map((r) => {
-    const who = r.member.discord ? `<@${r.member.discord}>` : r.member.name;
-    const amount = `к оплате ${money(r.owe.amount)}`;
-    if (r.status.key === 'today') return `${who} — оплата сегодня, ${amount}`;
-    return `${who} — не оплачено с ${fdShort(r.owe.since)}, ${amount}`;
-  });
-  const npr = nonPayRule();
-  const footer = npr ? `За неуплату — ${optionLabel(npr.options[0])} (п. ${npr.code})${npr.autoDays ? `, штраф выдаётся через ${days(npr.autoDays)} неоплаты` : ''}.` : '';
-  const text = lines.length ? `**Напоминание об оплате взноса**\n${lines.join('\n')}${footer ? `\n\n${footer}` : ''}` : '';
+  const text = debtors.length ? buildReminder(settings().reminder, debtors.map((r) => ({ today: r.status.key === 'today', vars: debtorVars(r) }))) : '';
   return { debtors, text };
 }
 
@@ -1256,13 +1294,385 @@ function remindModal() {
         <thead><tr><th>Кто</th><th>Не оплачено с</th><th class="r">К оплате</th></tr></thead>
         <tbody>${debtors.map((r) => `<tr><td>${memberCell(r.member)}</td><td class="num">${r.status.key === 'today' ? 'сегодня' : fd(r.owe.since)}</td><td class="num r">${money(r.owe.amount)}<div class="small muted">${days(r.owe.payDays)}${r.owe.withEntry ? ' + вступ.' : ''}</div></td></tr>`).join('')}</tbody>
       </table></div>
+      <div class="field"><span>Как будет выглядеть в Discord</span><div class="dc-preview">${discordHtml(text)}</div></div>
       <label class="field">Текст для Discord<textarea id="remind-text" rows="${Math.min(14, debtors.length + 5)}" readonly>${esc(text)}</textarea></label>
-      <span class="small muted">«К оплате» — самая дешёвая оплата, которая закрывает долг по сегодня включительно.</span>`
+      <span class="small muted">«К оплате» — самая дешёвая оплата, которая закрывает долг по сегодня включительно.${can('admin') ? ' Текст напоминания меняется в «Настройках».' : ''}</span>`
       : '<p class="muted">Должников нет — все оплатили.</p>'}
     <div class="modal-actions">
       <button type="button" class="btn ghost" data-act="close-modal">Закрыть</button>
       ${debtors.length ? '<button type="button" class="btn primary" data-act="copy-remind">Копировать</button>' : ''}
     </div>`, null, true);
+}
+
+// ----- разметка Discord: предпросмотр -----
+// Показывает текст примерно так, как его отрисует Discord. Сначала всё экранируется, потом размечается.
+function discordName(id) {
+  const m = S.data.members.find((x) => x.discord === id);
+  return m ? (m.discordTag || m.name) : id;
+}
+function discordInline(s) {
+  return s
+    .replace(/\*\*\*(.+?)\*\*\*/g, '<b><i>$1</i></b>')
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    .replace(/__(.+?)__/g, '<u>$1</u>')
+    .replace(/\*(.+?)\*/g, '<i>$1</i>')
+    .replace(/(^|[^\w])_(.+?)_(?![\w])/g, '$1<i>$2</i>')
+    .replace(/~~(.+?)~~/g, '<s>$1</s>')
+    .replace(/\|\|(.+?)\|\|/g, '<span class="dc-spoiler" tabindex="0">$1</span>')
+    .replace(/&lt;@!?(\d{5,25})&gt;/g, (m, id) => `<span class="dc-mention">@${esc(discordName(id))}</span>`)
+    .replace(/&lt;@&amp;(\d{5,25})&gt;/g, '<span class="dc-mention">@роль</span>')
+    .replace(/&lt;#(\d{5,25})&gt;/g, '<span class="dc-mention">#канал</span>')
+    .replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, '<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>');
+}
+function discordHtml(src) {
+  const keep = [];
+  const stash = (html) => `\u0000${keep.push(html) - 1}\u0000`;
+  let s = esc(src)
+    .replace(/```(?:[\w-]*\n)?([\s\S]*?)```/g, (m, code) => stash(`<pre class="dc-pre">${code.replace(/\n$/, '')}</pre>`))
+    .replace(/`([^`\n]+)`/g, (m, code) => stash(`<code class="dc-code">${code}</code>`));
+  let quoteRest = false;
+  const out = s.split('\n').map((raw) => {
+    let line = raw;
+    let quote = quoteRest;
+    if (!quote && line.startsWith('&gt;&gt;&gt; ')) { quoteRest = true; quote = true; line = line.slice(13); }
+    else if (!quote && line.startsWith('&gt; ')) { quote = true; line = line.slice(5); }
+    let tag = 'div';
+    let cls = '';
+    let m;
+    if ((m = line.match(/^(#{1,3}) (.+)$/))) { tag = `h${m[1].length + 2}`; line = m[2]; }
+    else if ((m = line.match(/^-# (.+)$/))) { cls = 'dc-sub'; line = m[1]; }
+    else if ((m = line.match(/^\s*[-*] (.+)$/))) { cls = 'dc-li'; line = `• ${m[1]}`; }
+    return `<${tag} class="dc-line ${quote ? 'dc-quote' : ''} ${cls}">${discordInline(line) || '&nbsp;'}</${tag}>`;
+  });
+  return out.join('').replace(/\u0000(\d+)\u0000/g, (m, i) => keep[Number(i)]);
+}
+
+// ----- Заготовки -----
+const templateText = (body) => fillTemplate(body, { date: fd(T()) });
+
+function templatesTab() {
+  const list = S.data.templates || [];
+  const edit = can('editor');
+  return `
+    ${explain('Заготовки — готовые тексты для Discord: объявления, правила, приветствие новичков. Поддерживается разметка Discord: **жирный**, *курсив*, __подчёркнутый__, ~~зачёркнутый~~, ||спойлер||, `код`, > цитата, # заголовок, -# мелкий текст, - список, упоминания &lt;@id&gt;. Подстановка <b>{date}</b> заменится на сегодняшнюю дату. Нажмите «Копировать» и вставьте в Discord.')}
+    <div class="toolbar">
+      <span class="grow"></span>
+      ${edit ? '<button class="btn primary" data-act="new-tpl">+ Заготовка</button>' : ''}
+    </div>
+    ${list.length ? `<div class="tpl-grid">${list.map((t) => `
+      <article class="panel tpl">
+        <div class="tpl-head"><h3>${esc(t.title)}</h3>
+          <span class="actions">
+            <button class="btn sm primary" data-act="copy-tpl" data-id="${t.id}">Копировать</button>
+            ${edit ? `<button class="btn sm ghost" data-act="edit-tpl" data-id="${t.id}">Изменить</button>` : ''}
+          </span>
+        </div>
+        <div class="dc-preview">${discordHtml(templateText(t.body))}</div>
+      </article>`).join('')}</div>`
+      : `<div class="card">${emptyState('Заготовок пока нет', 'Добавьте текст, который часто отправляете в Discord, — потом он копируется одной кнопкой.', edit ? '<button class="btn primary" data-act="new-tpl">+ Заготовка</button>' : '')}</div>`}`;
+}
+
+// Кнопки разметки: обернуть выделение или добавить префикс строкам
+const FMT = [
+  { k: 'b', label: '<b>Ж</b>', title: 'Жирный', wrap: ['**', '**'] },
+  { k: 'i', label: '<i>К</i>', title: 'Курсив', wrap: ['*', '*'] },
+  { k: 'u', label: '<u>П</u>', title: 'Подчёркнутый', wrap: ['__', '__'] },
+  { k: 's', label: '<s>З</s>', title: 'Зачёркнутый', wrap: ['~~', '~~'] },
+  { k: 'sp', label: '▒', title: 'Спойлер', wrap: ['||', '||'] },
+  { k: 'code', label: '&lt;/&gt;', title: 'Код в строке', wrap: ['`', '`'] },
+  { k: 'block', label: '{ }', title: 'Блок кода', wrap: ['```\n', '\n```'] },
+  { k: 'h1', label: 'H1', title: 'Большой заголовок', prefix: '# ' },
+  { k: 'h2', label: 'H2', title: 'Заголовок', prefix: '## ' },
+  { k: 'h3', label: 'H3', title: 'Малый заголовок', prefix: '### ' },
+  { k: 'sub', label: '-#', title: 'Мелкий серый текст', prefix: '-# ' },
+  { k: 'q', label: '❝', title: 'Цитата', prefix: '> ' },
+  { k: 'li', label: '•', title: 'Список', prefix: '- ' },
+];
+
+function applyFormat(ta, f) {
+  const { selectionStart: a, selectionEnd: b, value } = ta;
+  if (f.wrap) {
+    const sel = value.slice(a, b) || 'текст';
+    ta.value = value.slice(0, a) + f.wrap[0] + sel + f.wrap[1] + value.slice(b);
+    ta.setSelectionRange(a + f.wrap[0].length, a + f.wrap[0].length + sel.length);
+  } else {
+    // Префикс ко всем выделенным строкам
+    const start = value.lastIndexOf('\n', a - 1) + 1;
+    const block = value.slice(start, b);
+    const changed = block.split('\n').map((l) => f.prefix + l).join('\n');
+    ta.value = value.slice(0, start) + changed + value.slice(b);
+    ta.setSelectionRange(start, start + changed.length);
+  }
+  ta.focus();
+  ta.dispatchEvent(new Event('input'));
+}
+
+function insertAtCursor(ta, text) {
+  const { selectionStart: a, selectionEnd: b, value } = ta;
+  ta.value = value.slice(0, a) + text + value.slice(b);
+  ta.setSelectionRange(a + text.length, a + text.length);
+  ta.focus();
+  ta.dispatchEvent(new Event('input'));
+}
+
+function templateForm(t = null) {
+  const withDiscord = S.data.members.filter((m) => m.discord && !m.left).sort((a, b) => a.name.localeCompare(b.name));
+  openModal(formShell(t ? 'Изменить заготовку' : 'Новая заготовка', `
+    <label class="field">Название<input id="f-title" value="${esc(t?.title || '')}" placeholder="Например: Приветствие новичка"></label>
+    <div class="field"><span>Текст</span>
+      <div class="fmt-bar">${FMT.map((f) => `<button type="button" class="btn sm ghost" data-fmt="${f.k}" title="${f.title}">${f.label}</button>`).join('')}
+        ${withDiscord.length ? `<select id="f-mention" title="Упомянуть участника"><option value="">@ упомянуть…</option>${withDiscord.map((m) => `<option value="${esc(m.discord)}">${esc(m.name)}</option>`).join('')}</select>` : ''}
+      </div>
+      <textarea id="f-body" rows="9" placeholder="**Важно!** Взнос вносится каждый день…">${esc(t?.body || '')}</textarea>
+      <span class="small muted" id="f-count"></span>
+    </div>
+    <div class="field"><span>Предпросмотр</span><div class="dc-preview" id="f-preview"></div></div>
+  `, { onDelete: !!t }), (root) => {
+    const ta = $('#f-body', root);
+    const update = () => {
+      const text = templateText(ta.value);
+      $('#f-preview').innerHTML = text.trim() ? discordHtml(text) : '<span class="muted">Здесь появится текст так, как его покажет Discord.</span>';
+      const n = text.length;
+      $('#f-count').innerHTML = n > 2000 ? `<span class="bad-text">${n} / 2000 — Discord без Nitro не примет сообщение длиннее 2000 символов</span>` : `${n} / 2000`;
+    };
+    ta.addEventListener('input', update);
+    $('.fmt-bar', root).addEventListener('click', (e) => {
+      const b = e.target.closest('[data-fmt]');
+      if (b) applyFormat(ta, FMT.find((f) => f.k === b.dataset.fmt));
+    });
+    $('#f-mention', root)?.addEventListener('change', (e) => { if (e.target.value) insertAtCursor(ta, `<@${e.target.value}>`); e.target.value = ''; });
+    update();
+    bindForm(root, async () => {
+      const body = { title: $('#f-title').value, body: ta.value };
+      if (t) await api('PUT', `/api/templates/${t.id}`, body); else await api('POST', '/api/templates', body);
+      await afterSave(t ? 'Заготовка сохранена' : 'Заготовка добавлена');
+    }, t && (async () => { await api('DELETE', `/api/templates/${t.id}`); await afterSave('Заготовка удалена'); }));
+  }, true);
+}
+
+// ----- Настройки -----
+const varsHelp = (group, all = REMINDER_VARS) => Object.entries(all[group]).map(([k, d]) => `<button type="button" class="var" data-var="{${k}}" title="${esc(d)}">{${k}}</button>`).join('');
+
+// ----- текст состава для Discord: группы по должностям в порядке из настроек -----
+const lineupVars = (r) => ({
+  mention: r.member.discord ? `<@${r.member.discord}>` : r.member.name,
+  name: r.member.name,
+  tag: r.member.discordTag ? `@${r.member.discordTag}` : r.member.name,
+  role: roleLabel(r.member.role),
+  joined: fd(r.member.joined),
+  days_in: r.daysInDept ?? '—',
+  paid_until: paidUntilText(r),
+});
+
+function lineupGroups() {
+  const active = buildRoster(S.data, settings(), T()).filter((r) => !r.member.left);
+  const known = new Set(roles().map((x) => x.id));
+  return roles().map((role) => ({
+    role,
+    people: active
+      // Должность, которой нет в настройках, считаем «Участником»
+      .filter((r) => (known.has(r.member.role) ? r.member.role : 'member') === role.id)
+      .sort((a, b) => (a.member.joined || '').localeCompare(b.member.joined || '') || a.member.name.localeCompare(b.member.name))
+      .map((r) => lineupVars(r)),
+  }));
+}
+
+function buildLineup(tpl, groups) {
+  const total = groups.reduce((s, g) => s + g.people.length, 0);
+  const common = { count: total, date: fdShort(T()) };
+  const parts = [];
+  const header = fillTemplate(tpl.header, common);
+  if (header.trim()) parts.push(header);
+  for (const g of groups) {
+    if (!g.people.length && !tpl.showEmpty) continue;
+    const head = fillTemplate(tpl.group, { role: g.role.label, count: g.people.length });
+    const lines = g.people.length ? g.people.map((v) => fillTemplate(tpl.line, v)) : ['—'];
+    parts.push([head.trim() ? head : null, ...lines].filter((x) => x != null).join('\n'));
+  }
+  const footer = fillTemplate(tpl.footer, common);
+  if (footer.trim()) parts.push(footer);
+  return parts.join('\n\n');
+}
+
+// Для предпросмотра в настройках: реальный состав, а если он пуст — пример
+function lineupSample() {
+  const groups = lineupGroups();
+  if (groups.some((g) => g.people.length)) return groups;
+  const sample = (name, id, roleId) => ({ mention: `<@${id}>`, name, tag: `@${name.split(' ')[0].toLowerCase()}`, role: roleLabel(roleId), joined: fd(T() - 20), days_in: 20, paid_until: fd(T() + 3) });
+  return roles().map((role, i) => ({ role, people: i === 0 ? [sample('Li Ilyan', '652927337016328212', role.id)] : role.id === 'member' ? [sample('Pan Asteryan', '946385586904764457', role.id), sample('Liza Nelsonyan', '976407393355333652', role.id)] : [] }));
+}
+
+function lineupModal() {
+  const groups = lineupGroups();
+  const total = groups.reduce((s, g) => s + g.people.length, 0);
+  const text = buildLineup(settings().lineup, groups);
+  openModal(`
+    <h2>Состав для Discord</h2>
+    ${total ? `
+      <div class="field"><span>Как будет выглядеть в Discord</span><div class="dc-preview">${discordHtml(text)}</div></div>
+      <label class="field">Текст для Discord<textarea id="lineup-text" rows="${Math.min(16, total + groups.length * 2 + 3)}" readonly>${esc(text)}</textarea></label>
+      <span class="small muted">Группы идут в порядке должностей из «Настроек»; ушедшие не попадают.${can('admin') ? ' Текст меняется в «Настройках».' : ''}</span>`
+      : '<p class="muted">В отделе пока никого нет.</p>'}
+    <div class="modal-actions">
+      <button type="button" class="btn ghost" data-act="close-modal">Закрыть</button>
+      ${total ? '<button type="button" class="btn primary" data-act="copy-lineup">Копировать</button>' : ''}
+    </div>`, null, true);
+}
+
+function lineupForm() {
+  const l = settings().lineup;
+  openModal(formShell('Текст состава', `
+    <span class="small muted">Нажмите на подстановку — она вставится туда, где стоит курсор. Группы идут в порядке должностей (меняется в «Состав → Изменить»).</span>
+    <label class="field">Заголовок (пусто — без заголовка)<textarea id="f-header" rows="2">${esc(l.header)}</textarea></label>
+    <div class="vars">${varsHelp('header', LINEUP_VARS)}</div>
+    <label class="field">Заголовок группы — для каждой должности (пусто — без него)<textarea id="f-group" rows="2">${esc(l.group)}</textarea></label>
+    <div class="vars">${varsHelp('group', LINEUP_VARS)}</div>
+    <label class="field">Строка на каждого человека<textarea id="f-line" rows="2">${esc(l.line)}</textarea></label>
+    <div class="vars">${varsHelp('line', LINEUP_VARS)}</div>
+    <label class="field">Строка внизу (пусто — без неё)<textarea id="f-footer" rows="2">${esc(l.footer)}</textarea></label>
+    <div class="vars">${varsHelp('footer', LINEUP_VARS)}</div>
+    <label class="check"><input type="checkbox" id="f-empty" ${l.showEmpty ? 'checked' : ''}> Показывать должности, на которых никого нет (с прочерком)</label>
+    <div class="field"><span>Предпросмотр</span><div class="dc-preview" id="f-preview"></div></div>
+    <div><button type="button" class="btn sm ghost" id="f-reset">Вернуть как было по умолчанию</button></div>
+  `), (root) => {
+    let last = $('#f-line', root);
+    const read = () => ({ header: $('#f-header').value, group: $('#f-group').value, line: $('#f-line').value, footer: $('#f-footer').value, showEmpty: $('#f-empty').checked });
+    const update = () => { $('#f-preview').innerHTML = discordHtml(buildLineup(read(), lineupSample())); };
+    root.querySelectorAll('textarea').forEach((ta) => { ta.addEventListener('focus', () => { last = ta; }); ta.addEventListener('input', update); });
+    $('#f-empty', root).addEventListener('change', update);
+    $('#f', root).addEventListener('click', (e) => {
+      const v = e.target.closest('[data-var]');
+      if (v) insertAtCursor(last, v.dataset.var);
+    });
+    $('#f-reset', root).addEventListener('click', () => {
+      $('#f-header').value = DEFAULT_LINEUP.header; $('#f-group').value = DEFAULT_LINEUP.group;
+      $('#f-line').value = DEFAULT_LINEUP.line; $('#f-footer').value = DEFAULT_LINEUP.footer; $('#f-empty').checked = DEFAULT_LINEUP.showEmpty;
+      update();
+    });
+    update();
+    bindForm(root, async () => {
+      await api('PUT', '/api/settings/lineup', read());
+      await afterSave('Текст состава сохранён');
+    });
+  }, true);
+}
+
+// Пример должников для предпросмотра, если сейчас никто не должен
+function reminderSample() {
+  const real = buildRoster(S.data, settings(), T()).filter((r) => !r.member.left && r.owe).slice(0, 3);
+  if (real.length) return real.map((r) => ({ today: r.status.key === 'today', vars: debtorVars(r) }));
+  return [
+    { today: false, vars: { mention: '<@946385586904764457>', name: 'Pan Asteryan', tag: '@pan.asteryan', since: fdShort(T() - 3), days: 4, amount: money(52500), pay_days: 7 } },
+    { today: true, vars: { mention: '<@976407393355333652>', name: 'Liza Nelsonyan', tag: '@liza', since: fdShort(T()), days: 1, amount: money(15000), pay_days: 1 } },
+  ];
+}
+
+function settingsTab() {
+  const st = settings();
+  const r = st.reminder;
+  const c = st.roster.columns;
+  return `
+    ${explain('Настройки сайта. Меняет администратор, изменения сразу видны всем. Если чего-то не хватает — опишите, что нужно, и это добавится сюда же.')}
+    <div class="cols settings-cols">
+      <section class="panel">
+        <div class="tpl-head"><h3>Напоминание должникам</h3><button class="btn sm" data-act="edit-reminder">Изменить текст</button></div>
+        <p class="small muted" style="margin:0">Так выглядит текст кнопки «Напоминание должникам» на вкладке «Состав».</p>
+        <div class="dc-preview">${discordHtml(buildReminder(r, reminderSample()))}</div>
+      </section>
+      <section class="panel">
+        <div class="tpl-head"><h3>Текст состава для Discord</h3><button class="btn sm" data-act="edit-lineup">Изменить текст</button></div>
+        <p class="small muted" style="margin:0">Так выглядит текст кнопки «Состав для Discord» на вкладке «Состав».</p>
+        <div class="dc-preview">${discordHtml(buildLineup(st.lineup, lineupSample()))}</div>
+      </section>
+      <section class="panel">
+        <div class="tpl-head"><h3>Состав</h3><button class="btn sm" data-act="edit-roster-settings">Изменить</button></div>
+        <div class="field"><span>Должности — в этом порядке идут группы в тексте состава</span><div class="chips">${st.roster.roles.map((x) => `<span class="chip">${esc(x.label)}</span>`).join('')}</div></div>
+        <div class="field"><span>Колонки таблицы и скриншота</span>
+          <div class="col-list">${Object.entries(ROSTER_COLUMNS).map(([k, l]) => `<span class="${c[k] ? '' : 'muted off'}">${c[k] ? '✓' : '✕'} ${esc(l)}</span>`).join('')}</div>
+        </div>
+      </section>
+    </div>`;
+}
+
+function reminderForm() {
+  const r = settings().reminder;
+  openModal(formShell('Текст напоминания', `
+    <span class="small muted">Нажмите на подстановку — она вставится туда, где стоит курсор. Разметка Discord работает: **жирный**, *курсив* и т.д.</span>
+    <label class="field">Заголовок (пусто — без заголовка)<textarea id="f-header" rows="2">${esc(r.header)}</textarea></label>
+    <div class="vars">${varsHelp('header')}</div>
+    <label class="field">Строка на каждого должника<textarea id="f-line" rows="2">${esc(r.line)}</textarea></label>
+    <label class="field">Строка, если оплата сегодня (пусто — как обычная)<textarea id="f-line-today" rows="2">${esc(r.lineToday)}</textarea></label>
+    <div class="vars">${varsHelp('line')}</div>
+    <label class="field">Строка внизу (пусто — без неё)<textarea id="f-footer" rows="2">${esc(r.footer)}</textarea></label>
+    <div class="vars">${varsHelp('footer')}</div>
+    <div class="field"><span>Предпросмотр</span><div class="dc-preview" id="f-preview"></div></div>
+    <div><button type="button" class="btn sm ghost" id="f-reset">Вернуть как было по умолчанию</button></div>
+  `), (root) => {
+    let last = $('#f-line', root);
+    const read = () => ({ header: $('#f-header').value, line: $('#f-line').value, lineToday: $('#f-line-today').value, footer: $('#f-footer').value });
+    const update = () => { $('#f-preview').innerHTML = discordHtml(buildReminder(read(), reminderSample())); };
+    root.querySelectorAll('textarea').forEach((ta) => { ta.addEventListener('focus', () => { last = ta; }); ta.addEventListener('input', update); });
+    $('#f', root).addEventListener('click', (e) => {
+      const v = e.target.closest('[data-var]');
+      if (v) insertAtCursor(last, v.dataset.var);
+    });
+    $('#f-reset', root).addEventListener('click', () => {
+      $('#f-header').value = DEFAULT_REMINDER.header; $('#f-line').value = DEFAULT_REMINDER.line;
+      $('#f-line-today').value = DEFAULT_REMINDER.lineToday; $('#f-footer').value = DEFAULT_REMINDER.footer;
+      update();
+    });
+    update();
+    bindForm(root, async () => {
+      await api('PUT', '/api/settings/reminder', read());
+      await afterSave('Текст напоминания сохранён');
+    });
+  }, true);
+}
+
+function rosterSettingsForm() {
+  const st = settings().roster;
+  let list = clone(st.roles);
+  const usedBy = (id) => S.data.members.filter((m) => m.role === id).length;
+  openModal(formShell('Настройки состава', `
+    <div class="field"><span>Должности — в таком порядке они будут в списке</span><div id="f-roles" class="role-list"></div>
+      <div><button type="button" class="btn sm" id="f-add-role">+ Должность</button></div>
+    </div>
+    <div class="field"><span>Колонки таблицы «Состав» и скриншота</span>
+      ${Object.entries(ROSTER_COLUMNS).map(([k, l]) => `<label class="check"><input type="checkbox" data-col="${k}" ${st.columns[k] ? 'checked' : ''}> ${esc(l)}</label>`).join('')}
+    </div>
+  `), (root) => {
+    const draw = () => {
+      $('#f-roles', root).innerHTML = list.map((r, i) => `
+        <div class="role-row">
+          <input class="input" data-role-i="${i}" value="${esc(r.label)}" ${r.id === 'member' ? 'title="Должность по умолчанию"' : ''}>
+          <button type="button" class="btn sm ghost" data-role-up="${i}" ${i ? '' : 'disabled'} aria-label="Выше">↑</button>
+          ${r.id === 'member' ? '<span class="small muted">по умолчанию, не удаляется</span>' : `<button type="button" class="btn sm ghost danger" data-role-del="${i}">Удалить</button>`}
+        </div>
+        ${r.id && r.id !== 'member' && usedBy(r.id) ? `<span class="small muted role-note">Занята: ${usedBy(r.id)} чел. — при удалении они станут «Участниками».</span>` : ''}`).join('');
+    };
+    const form = $('#f', root);
+    form.addEventListener('input', (e) => { const i = e.target.dataset.roleI; if (i != null) list[Number(i)].label = e.target.value; });
+    form.addEventListener('click', (e) => {
+      const up = e.target.closest('[data-role-up]');
+      const del = e.target.closest('[data-role-del]');
+      if (up) { const i = Number(up.dataset.roleUp); [list[i - 1], list[i]] = [list[i], list[i - 1]]; draw(); }
+      if (del) {
+        // Занятую должность удаляем со вторым нажатием: её люди станут «Участниками» после сохранения
+        const i = Number(del.dataset.roleDel);
+        if (list[i].id && usedBy(list[i].id) && !confirmClick(del, `Да, ${usedBy(list[i].id)} чел. → Участник`)) return;
+        list.splice(i, 1);
+        draw();
+      }
+    });
+    $('#f-add-role', root).addEventListener('click', () => { list.push({ id: '', label: '' }); draw(); root.querySelector(`[data-role-i="${list.length - 1}"]`).focus(); });
+    draw();
+    bindForm(root, async () => {
+      const columns = Object.fromEntries([...root.querySelectorAll('[data-col]')].map((el) => [el.dataset.col, el.checked]));
+      const cleaned = list.filter((r) => r.label.trim());
+      await api('PUT', '/api/settings/roster', { roles: cleaned, columns });
+      await afterSave('Настройки состава сохранены');
+    });
+  });
 }
 
 // ----- скриншот состава и штрафов -----
@@ -1283,15 +1693,8 @@ function shotHtml(kind) {
     title = 'Состав';
     sub = `${SHOT_FILTERS.roster[S.rosterFilter]} · ${rows.length} чел.`;
     table = `<table>
-      <thead><tr><th>Участник</th><th>Статус</th><th>Оплачено до</th><th>Посл. оплата</th><th class="r">Штрафы</th><th class="r">В отделе</th></tr></thead>
-      <tbody>${rows.map((r) => `<tr class="${r.member.left ? 'is-left' : ''}">
-        <td><div class="who"><b>${esc(r.member.name)}${r.member.role !== 'member' ? ` <span class="role">${esc(MEMBER_ROLES[r.member.role] || r.member.role)}</span>` : ''}</b>${r.member.discordTag ? `<span class="tag-at">@${esc(r.member.discordTag)}</span>` : ''}</div></td>
-        <td>${statusPill(r)}${r.owe ? `<div class="small muted owe">к оплате ${money(r.owe.amount)}</div>` : ''}</td>
-        <td class="num">${paidUntilText(r)}</td>
-        <td class="num">${r.lastPay ? `${fd(r.lastPay.date)} <span class="muted">· ${money(r.lastPay.amount)}</span>` : '—'}</td>
-        <td class="num r">${r.unpaidFinesSum ? `<span class="pill ${r.overdueFines.length ? 'bad' : 'warn'}">${money(r.unpaidFinesSum)}</span>` : '<span class="muted">—</span>'}</td>
-        <td class="num r">${r.daysInDept == null ? '—' : days(r.daysInDept)}</td>
-      </tr>`).join('')}</tbody></table>`;
+      <thead><tr>${rosterHead(true)}</tr></thead>
+      <tbody>${rows.map((r) => `<tr class="${r.member.left ? 'is-left' : ''}">${rosterCells(r, true)}</tr>`).join('')}</tbody></table>`;
   } else {
     const rows = filterFines();
     const sum = rows.filter((f) => !f.paid).reduce((s, f) => s + f.amount, 0);
@@ -1434,6 +1837,14 @@ document.addEventListener('click', async (e) => {
     case 'rule-edit': ruleForm(Number(el.dataset.cat), Number(el.dataset.item)); break;
     case 'notes-edit': notesForm(); break;
     case 'calc': calcModal(); break;
+    case 'new-tpl': templateForm(); break;
+    case 'edit-tpl': templateForm(find('templates')); break;
+    case 'copy-tpl': copy(templateText(find('templates').body), 'Скопировано — вставьте в Discord'); break;
+    case 'edit-reminder': reminderForm(); break;
+    case 'lineup': lineupModal(); break;
+    case 'copy-lineup': copy($('#lineup-text').value, 'Состав скопирован — вставьте его в Discord'); break;
+    case 'edit-lineup': lineupForm(); break;
+    case 'edit-roster-settings': rosterSettingsForm(); break;
     case 'shot': shotModal(el.dataset.kind); break;
     case 'remind': remindModal(); break;
     case 'copy-remind': copy($('#remind-text').value, 'Напоминание скопировано — вставьте его в Discord'); break;

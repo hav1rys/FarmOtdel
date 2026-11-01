@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { DEFAULT_SETTINGS, DEFAULT_RULES } from '../public/calc.js';
+import { DEFAULT_SETTINGS, DEFAULT_RULES, DEFAULT_REMINDER, DEFAULT_ROSTER, DEFAULT_LINEUP } from '../public/calc.js';
 
 // SQLite: встроенный в Node 22.13+ модуль, а на более старом Node (например, 20 у хостинга) — пакет better-sqlite3.
 // API у них совпадает в том, что мы используем: exec, prepare().run/get/all.
@@ -104,6 +104,15 @@ export function openDb(file) {
       created_by TEXT,
       created_at TEXT NOT NULL
     );
+    -- Заготовки: тексты с форматированием Discord, чтобы копировать и вставлять
+    CREATE TABLE IF NOT EXISTS templates (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      body TEXT NOT NULL DEFAULT '',
+      created_by TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS audit (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       at TEXT NOT NULL,
@@ -140,6 +149,7 @@ export const rowTo = {
     id: r.id, memberId: r.member_id, date: r.date, code: r.code, title: r.title || '', sanctions: JSON.parse(r.sanctions || '[]'),
     amount: r.amount, paid: !!r.paid, paidDate: r.paid_date, note: r.note, auto: !!r.auto,
   }),
+  template: (r) => ({ id: r.id, title: r.title, body: r.body, updatedAt: r.updated_at }),
   blacklist: (r) => ({
     id: r.id, discord: r.discord || '', name: r.name, reason: r.reason, date: r.date, until: r.until,
     memberId: r.member_id, fineId: r.fine_id, discordTag: r.discord_tag || '',
@@ -156,17 +166,28 @@ export function repo(db) {
         vacations: q('SELECT * FROM vacations ORDER BY start').all().map(rowTo.vacation),
         fines: q('SELECT * FROM fines ORDER BY date').all().map(rowTo.fine),
         blacklist: q('SELECT * FROM blacklist ORDER BY date DESC').all().map(rowTo.blacklist),
+        templates: q('SELECT * FROM templates ORDER BY created_at').all().map(rowTo.template),
       };
     },
     getSettings() {
       const row = q("SELECT value FROM settings WHERE key = 'main'").get();
-      const rules = q("SELECT value FROM settings WHERE key = 'rules'").get();
-      return { ...DEFAULT_SETTINGS, ...(row ? JSON.parse(row.value) : {}), rules: rules ? JSON.parse(rules.value) : DEFAULT_RULES };
+      const key = (k, def) => { const r = q('SELECT value FROM settings WHERE key = ?').get(k); return r ? JSON.parse(r.value) : def; };
+      const roster = key('roster', DEFAULT_ROSTER);
+      return {
+        ...DEFAULT_SETTINGS, ...(row ? JSON.parse(row.value) : {}),
+        rules: key('rules', DEFAULT_RULES),
+        reminder: { ...DEFAULT_REMINDER, ...key('reminder', {}) },
+        lineup: { ...DEFAULT_LINEUP, ...key('lineup', {}) },
+        roster: { roles: roster.roles, columns: { ...DEFAULT_ROSTER.columns, ...roster.columns } },
+      };
+    },
+    setKey(k, value) {
+      q('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value').run(k, JSON.stringify(value));
     },
     setRules(rules) {
       q("INSERT INTO settings (key, value) VALUES ('rules', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(rules));
     },
-    setSettings({ rules, ...s }) {
+    setSettings({ rules, reminder, roster, lineup, ...s }) {
       q("INSERT INTO settings (key, value) VALUES ('main', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(s));
     },
 
@@ -219,6 +240,12 @@ export function repo(db) {
            discord_tag = CASE WHEN blacklist.discord IS excluded.discord THEN blacklist.discord_tag END`)
         .run(b.id, b.discord || null, b.name, b.reason || '', b.date, b.until || null, b.memberId || null, b.fineId || null, actor, now());
     },
+    upsertTemplate(t, actor) {
+      const at = now();
+      q(`INSERT INTO templates (id, title, body, created_by, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET title = excluded.title, body = excluded.body, updated_at = excluded.updated_at`)
+        .run(t.id, t.title, t.body, actor, at, at);
+    },
     setBlacklistTag(id, tag) {
       q('UPDATE blacklist SET discord_tag = ? WHERE id = ?').run(tag || null, id);
     },
@@ -227,12 +254,12 @@ export function repo(db) {
       return !!q('SELECT 1 FROM fines WHERE member_id = ? AND code = ? AND date >= ? LIMIT 1').get(memberId, code, sinceIso);
     },
     remove(table, id) {
-      const allowed = { members: 1, payments: 1, vacations: 1, fines: 1, blacklist: 1 };
+      const allowed = { members: 1, payments: 1, vacations: 1, fines: 1, blacklist: 1, templates: 1 };
       if (!allowed[table]) throw new Error('bad table');
       return q(`DELETE FROM ${table} WHERE id = ?`).run(id).changes > 0;
     },
     get(table, id) {
-      const map = { members: rowTo.member, payments: rowTo.payment, vacations: rowTo.vacation, fines: rowTo.fine, blacklist: rowTo.blacklist };
+      const map = { members: rowTo.member, payments: rowTo.payment, vacations: rowTo.vacation, fines: rowTo.fine, blacklist: rowTo.blacklist, templates: rowTo.template };
       const r = q(`SELECT * FROM ${table} WHERE id = ?`).get(id);
       return r ? map[table](r) : null;
     },

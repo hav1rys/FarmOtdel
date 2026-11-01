@@ -191,6 +191,42 @@ tr.is-left td { color: var(--muted); }
 .rule-notes p { margin: 0; }
 .modal.wide { width: min(640px, 100%); }
 
+/* ---------- предпросмотр Discord: всегда в тёмных цветах Discord, как в самом приложении ---------- */
+:root { --dc-bg: #313338; --dc-ink: #dbdee1; --dc-muted: #949ba4; --dc-code: #2b2d31; --dc-quote: #4e5058; --dc-mention: rgb(88 101 242 / .3); --dc-mention-ink: #c9cdfb; --dc-link: #00a8fc; }
+.dc-preview { background: var(--dc-bg); color: var(--dc-ink); border-radius: 8px; padding: 12px 14px; font: 15px/1.375 'Golos Text', 'gg sans', system-ui, sans-serif; overflow-wrap: anywhere; min-width: 0; }
+.dc-line { min-height: 1.375em; }
+.dc-preview .dc-line:is(h3, h4, h5) { font-family: inherit; font-weight: 700; color: #f2f3f5; margin: 6px 0 2px; letter-spacing: 0; }
+.dc-preview h3.dc-line { font-size: 1.5rem; }
+.dc-preview h4.dc-line { font-size: 1.25rem; }
+.dc-preview h5.dc-line { font-size: 1rem; }
+.dc-quote { border-left: 4px solid var(--dc-quote); padding-left: 10px; }
+.dc-sub { font-size: .8rem; color: var(--dc-muted); }
+.dc-li { padding-left: 6px; }
+.dc-code { background: var(--dc-code); border-radius: 4px; padding: 1px 4px; font: .85em var(--f-mono); }
+.dc-pre { background: var(--dc-code); border: 1px solid #1e1f22; border-radius: 4px; padding: 8px; margin: 4px 0; font: .85em/1.4 var(--f-mono); white-space: pre-wrap; color: var(--dc-ink); }
+.dc-spoiler { background: #1e1f22; color: transparent; border-radius: 3px; padding: 0 2px; cursor: pointer; }
+.dc-spoiler:hover, .dc-spoiler:focus { background: rgb(255 255 255 / .1); color: inherit; }
+.dc-mention { background: var(--dc-mention); color: var(--dc-mention-ink); border-radius: 3px; padding: 0 2px; font-weight: 500; }
+.dc-preview a { color: var(--dc-link); }
+
+/* ---------- заготовки и настройки ---------- */
+.tpl-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(min(100%, 380px), 1fr)); gap: 16px; align-items: start; }
+.tpl-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.tpl-head h3 { min-width: 0; overflow-wrap: anywhere; }
+.fmt-bar { display: flex; flex-wrap: wrap; gap: 4px; align-items: center; color: var(--ink); }
+.fmt-bar .btn { min-width: 34px; font-family: var(--f-body); }
+.fmt-bar select { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 4px 8px; color: var(--ink); font-size: .85rem; }
+.vars { display: flex; flex-wrap: wrap; gap: 4px; margin-top: -6px; }
+.var { font: .78rem var(--f-mono); background: var(--accent-soft); color: var(--ink); border: 0; border-radius: 6px; padding: 2px 8px; cursor: pointer; }
+.var:hover { background: var(--accent); color: var(--accent-ink); }
+.role-list { display: grid; gap: 6px; }
+.role-row { display: flex; gap: 6px; align-items: center; color: var(--ink); }
+.role-row .input { flex: 1; }
+.role-note { margin: -2px 0 4px 2px; }
+.col-list { display: grid; gap: 4px; color: var(--ink); font-size: .92rem; }
+.col-list .off { text-decoration: line-through; }
+.settings-cols { grid-template-columns: repeat(auto-fit, minmax(min(100%, 360px), 1fr)); }
+
 /* ---------- скриншот: собирается вне экрана с фиксированной шириной ---------- */
 .shot { position: absolute; left: -10000px; top: 0; width: 1120px; padding: 24px; background: var(--bg); color: var(--ink); display: grid; gap: 16px; font: 15px/1.5 var(--f-body); }
 .shot-head { display: flex; align-items: center; gap: 14px; }

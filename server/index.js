@@ -6,7 +6,7 @@ import { dirname, join } from 'node:path';
 import { openDb, repo, sqliteDriver } from './db.js';
 import { createDiscordBot } from './discord-bot.js';
 import {
-  DEFAULT_SETTINGS, CHIP_TYPES, MEMBER_ROLES, isIsoDate, daysFor, ruleByCode, autoRules, optionAmount,
+  DEFAULT_SETTINGS, CHIP_TYPES, ROSTER_COLUMNS, DEFAULT_REMINDER, isIsoDate, daysFor, ruleByCode, autoRules, optionAmount,
   memberState, todayNum, isoOf,
 } from '../public/calc.js';
 
@@ -277,7 +277,7 @@ function validRules(b) {
 
 const validators = {
   members: (b, id) => {
-    const role = MEMBER_ROLES[b.role] ? b.role : 'member';
+    const role = R.getSettings().roster.roles.some((r) => r.id === b.role) ? b.role : 'member';
     const name = str(b.name, 80);
     if (!name) throw new Bad('Укажите имя');
     return {
@@ -302,6 +302,14 @@ const validators = {
       note: str(b.note, 500),
     };
   },
+  templates: (b, id) => {
+    const title = str(b.title, 100);
+    if (!title) throw new Bad('Укажите название заготовки');
+    // Текст не обрезаем по краям: в Discord важны пробелы и пустые строки
+    const body = String(b.body ?? '').replace(/\r\n/g, '\n').slice(0, 6000);
+    if (!body.trim()) throw new Bad('Заготовка пустая');
+    return { id, title, body };
+  },
   blacklist: (b, id) => {
     const memberId = b.memberId ? memberRef(b.memberId) : null;
     const m = memberId ? R.get('members', memberId) : null;
@@ -314,8 +322,8 @@ const validators = {
     return { id, discord, name: name || discord, reason: str(b.reason, 300), date: d, until, memberId, fineId: str(b.fineId, 60) || null };
   },
 };
-const upserts = { members: 'upsertMember', payments: 'upsertPayment', vacations: 'upsertVacation', fines: 'upsertFine', blacklist: 'upsertBlacklist' };
-const labels = { members: 'участник', payments: 'оплата', vacations: 'отпуск', fines: 'штраф', blacklist: 'ЧС' };
+const upserts = { members: 'upsertMember', payments: 'upsertPayment', vacations: 'upsertVacation', fines: 'upsertFine', blacklist: 'upsertBlacklist', templates: 'upsertTemplate' };
+const labels = { members: 'участник', payments: 'оплата', vacations: 'отпуск', fines: 'штраф', blacklist: 'ЧС', templates: 'заготовка' };
 
 function describe(table, rec) {
   const m = rec.memberId ? R.get('members', rec.memberId) : rec;
@@ -323,6 +331,7 @@ function describe(table, rec) {
   if (table === 'payments') return `${who}: ${rec.amount.toLocaleString('ru-RU')}$ за ${rec.days} дн. (${rec.date})`;
   if (table === 'vacations') return `${who}: отпуск ${rec.days} дн. с ${rec.start}`;
   if (table === 'fines') return `${who}: штраф ${rec.code === 'other' ? '' : rec.code + ' '}«${rec.title}», ${rec.amount.toLocaleString('ru-RU')}$${rec.paid ? ' (оплачен)' : ''}`;
+  if (table === 'templates') return `«${rec.title}»`;
   if (table === 'blacklist') return `${rec.name}${rec.discord ? ` (${rec.discord})` : ''}: ${rec.reason || 'без причины'}${rec.until ? `, до ${rec.until}` : ', навсегда'}`;
   return who;
 }
@@ -489,6 +498,63 @@ app.put('/api/settings', need('admin'), (req, res) => {
     R.log(req.userId, 'Изменены цены', `Цены: ${prices.join(' / ')}, вступительный ${s.entryFee}`);
     changed();
     res.json(s);
+  } catch (e) {
+    if (e instanceof Bad) return res.status(400).json({ error: e.message });
+    throw e;
+  }
+});
+
+// Текст напоминания должникам
+app.put('/api/settings/reminder', need('admin'), (req, res) => {
+  const b = req.body || {};
+  const text = (v, max) => String(v ?? '').replace(/\r\n/g, '\n').slice(0, max);
+  const reminder = {};
+  for (const k of Object.keys(DEFAULT_REMINDER)) reminder[k] = text(b[k], 1000);
+  if (!reminder.line.trim()) return res.status(400).json({ error: 'Строка для должника не может быть пустой' });
+  R.setKey('reminder', reminder);
+  R.log(req.userId, 'Изменены настройки', 'Текст напоминания должникам');
+  changed();
+  res.json(reminder);
+});
+
+// Текст состава для Discord
+app.put('/api/settings/lineup', need('admin'), (req, res) => {
+  const b = req.body || {};
+  const text = (v) => String(v ?? '').replace(/\r\n/g, '\n').slice(0, 1000);
+  const lineup = { header: text(b.header), group: text(b.group), line: text(b.line), footer: text(b.footer), showEmpty: !!b.showEmpty };
+  if (!lineup.line.trim()) return res.status(400).json({ error: 'Строка для участника не может быть пустой' });
+  R.setKey('lineup', lineup);
+  R.log(req.userId, 'Изменены настройки', 'Текст состава для Discord');
+  changed();
+  res.json(lineup);
+});
+
+// Настройки состава: должности и колонки таблицы
+app.put('/api/settings/roster', need('admin'), (req, res) => {
+  try {
+    const b = req.body || {};
+    if (!Array.isArray(b.roles) || !b.roles.length || b.roles.length > 30) throw new Bad('Нужна хотя бы одна должность');
+    const ids = new Set();
+    const roles = b.roles.map((r) => {
+      const label = str(r.label, 40);
+      if (!label) throw new Bad('У должности нет названия');
+      let rid = /^[a-z0-9_-]{1,24}$/i.test(r.id || '') ? r.id : `r${randomUUID().slice(0, 8)}`;
+      while (ids.has(rid)) rid = `r${randomUUID().slice(0, 8)}`;
+      ids.add(rid);
+      return { id: rid, label };
+    });
+    if (!ids.has('member')) throw new Bad('Должность «Участник» удалить нельзя — она ставится по умолчанию');
+    const columns = Object.fromEntries(Object.keys(ROSTER_COLUMNS).map((k) => [k, b.columns?.[k] !== false]));
+    // Кто числился на удалённой должности, становится «Участником»
+    const moved = R.allRecords().members.filter((m) => !ids.has(m.role));
+    R.transaction(() => {
+      for (const m of moved) R.upsertMember({ ...m, role: 'member' }, req.userId);
+      R.setKey('roster', { roles, columns });
+    });
+    if (moved.length) R.log(req.userId, 'Изменено: участник', `Должность удалена, стали «Участниками»: ${moved.map((m) => m.name).join(', ')}`);
+    R.log(req.userId, 'Изменены настройки', `Состав: должностей ${roles.length}, колонки: ${Object.entries(columns).filter(([, v]) => v).map(([k]) => ROSTER_COLUMNS[k]).join(', ')}`);
+    changed();
+    res.json({ roles, columns });
   } catch (e) {
     if (e instanceof Bad) return res.status(400).json({ error: e.message });
     throw e;
