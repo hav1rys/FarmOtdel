@@ -1,11 +1,23 @@
-import { DatabaseSync } from 'node:sqlite';
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { DEFAULT_SETTINGS } from '../public/calc.js';
 
+// SQLite: встроенный в Node 22.13+ модуль, а на более старом Node (например, 20 у хостинга) — пакет better-sqlite3.
+// API у них совпадает в том, что мы используем: exec, prepare().run/get/all.
+let Driver;
+export let sqliteDriver;
+if (process.env.FARM_SQLITE !== 'better-sqlite3') {
+  try { ({ DatabaseSync: Driver } = await import('node:sqlite')); sqliteDriver = 'node:sqlite'; } catch {}
+}
+if (!Driver) {
+  try { Driver = (await import('better-sqlite3')).default; sqliteDriver = 'better-sqlite3'; } catch {
+    throw new Error(`Нет SQLite: нужен Node.js 22.13+ или установленный пакет better-sqlite3 (npm install). Сейчас Node ${process.version}.`);
+  }
+}
+
 export function openDb(file) {
   mkdirSync(dirname(file), { recursive: true });
-  const db = new DatabaseSync(file);
+  const db = new Driver(file);
   db.exec(`
     PRAGMA journal_mode = WAL;
     PRAGMA foreign_keys = ON;

@@ -5,13 +5,17 @@
   "description": "Учёт оплат, отпусков и штрафов отдела Farm с входом через Discord",
   "type": "module",
   "engines": {
-    "node": ">=22.13"
+    "node": ">=20"
   },
   "scripts": {
-    "start": "node --disable-warning=ExperimentalWarning server/index.js",
+    "start": "node --disable-warning=ExperimentalWarning index.js",
     "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js"
   },
   "dependencies": {
     "express": "^4.22.3"
-  }
+  },
+  "optionalDependencies": {
+    "better-sqlite3": "^12.11.1"
+  },
+  "main": "index.js"
 }

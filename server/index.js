@@ -3,7 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto';
 import { existsSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
-import { openDb, repo } from './db.js';
+import { openDb, repo, sqliteDriver } from './db.js';
 import { createDiscordBot } from './discord-bot.js';
 import { DEFAULT_SETTINGS, FINE_CATALOG, MEMBER_ROLES, isIsoDate, daysFor } from '../public/calc.js';
 
@@ -11,18 +11,22 @@ const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 if (existsSync(join(root, '.env'))) process.loadEnvFile(join(root, '.env'));
 
 const PORT = Number(process.env.PORT || 3000);
-const HOST = process.env.HOST || undefined; // на сервере 127.0.0.1: снаружи доступ только через Caddy
-const BASE_URL = (process.env.BASE_URL || `http://localhost:${PORT}`).replace(/\/$/, '');
+const HOST = process.env.HOST || undefined;
+// Адрес сайта: BASE_URL, иначе DOMAIN, иначе берётся из самого запроса
+// (на Bothost переменных окружения не больше пяти, поэтому адрес можно не задавать)
+const ENV_BASE = (process.env.BASE_URL || (process.env.DOMAIN ? `https://${process.env.DOMAIN}` : '')).replace(/\/$/, '');
 const CLIENT_ID = process.env.DISCORD_CLIENT_ID || '';
 const CLIENT_SECRET = process.env.DISCORD_CLIENT_SECRET || '';
 const OWNER_IDS = (process.env.OWNER_DISCORD_IDS || '').split(',').map((s) => s.trim()).filter(Boolean);
-const IS_LOCAL = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(BASE_URL);
+const IS_LOCAL = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(ENV_BASE);
 // Вход без Discord — только для проверки на своём компьютере
 const DEV_LOGIN = process.env.DEV_LOGIN === '1' && IS_LOCAL;
-const SECURE_COOKIE = BASE_URL.startsWith('https://');
 const SESSION_TTL = 30 * 24 * 3600 * 1000;
 
-const db = openDb(process.env.DB_FILE || join(root, 'data', 'farm.db'));
+// На Bothost постоянный диск — /app/data: только там база переживает перезапуск и обновление из GitHub
+const DATA_DIR = process.env.DATA_DIR || (existsSync('/app/data') ? '/app/data' : join(root, 'data'));
+const DB_FILE = process.env.DB_FILE || join(DATA_DIR, 'farm.db');
+const db = openDb(DB_FILE);
 const R = repo(db);
 const bot = createDiscordBot(process.env.DISCORD_BOT_TOKEN || '');
 
@@ -53,9 +57,18 @@ function parseCookies(req) {
   }
   return out;
 }
-function setCookie(res, name, value, maxAgeMs) {
+function baseUrl(req) {
+  if (ENV_BASE) return ENV_BASE;
+  const host = req.get('x-forwarded-host')?.split(',')[0].trim() || req.get('host');
+  const local = /^(localhost|127\.0\.0\.1)(:\d+)?$/.test(host);
+  const proto = req.get('x-forwarded-proto')?.split(',')[0].trim() || (local ? 'http' : 'https');
+  return `${proto}://${host}`;
+}
+const redirectUri = (req) => `${baseUrl(req)}/auth/discord/callback`;
+
+function setCookie(req, res, name, value, maxAgeMs) {
   const bits = [`${name}=${encodeURIComponent(value)}`, 'Path=/', 'HttpOnly', 'SameSite=Lax', `Max-Age=${Math.floor(maxAgeMs / 1000)}`];
-  if (SECURE_COOKIE) bits.push('Secure');
+  if (baseUrl(req).startsWith('https://')) bits.push('Secure');
   res.append('Set-Cookie', bits.join('; '));
 }
 
@@ -85,14 +98,14 @@ const need = (min) => (req, res, next) => {
 
 // ---------- вход через Discord ----------
 app.get('/auth/discord', (req, res) => {
-  if (!CLIENT_ID || !CLIENT_SECRET) return res.status(500).send('Вход через Discord не настроен: заполните DISCORD_CLIENT_ID и DISCORD_CLIENT_SECRET в .env');
+  if (!CLIENT_ID || !CLIENT_SECRET) return res.status(500).send('Вход через Discord не настроен: задайте переменные DISCORD_CLIENT_ID и DISCORD_CLIENT_SECRET');
   const state = randomBytes(16).toString('hex');
-  setCookie(res, 'oauth_state', state, 10 * 60 * 1000);
+  setCookie(req, res, 'oauth_state', state, 10 * 60 * 1000);
   const url = new URL('https://discord.com/oauth2/authorize');
   url.searchParams.set('client_id', CLIENT_ID);
   url.searchParams.set('response_type', 'code');
   url.searchParams.set('scope', 'identify');
-  url.searchParams.set('redirect_uri', `${BASE_URL}/auth/discord/callback`);
+  url.searchParams.set('redirect_uri', redirectUri(req));
   url.searchParams.set('state', state);
   url.searchParams.set('prompt', 'none');
   res.redirect(url.toString());
@@ -101,7 +114,7 @@ app.get('/auth/discord', (req, res) => {
 app.get('/auth/discord/callback', async (req, res) => {
   const { code, state } = req.query;
   const expected = parseCookies(req).oauth_state;
-  setCookie(res, 'oauth_state', '', 0);
+  setCookie(req, res, 'oauth_state', '', 0);
   if (!code || !state || state !== expected) return res.redirect('/?login=failed');
   try {
     const tokenRes = await fetch('https://discord.com/api/oauth2/token', {
@@ -109,7 +122,7 @@ app.get('/auth/discord/callback', async (req, res) => {
       headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
       body: new URLSearchParams({
         client_id: CLIENT_ID, client_secret: CLIENT_SECRET, grant_type: 'authorization_code',
-        code: String(code), redirect_uri: `${BASE_URL}/auth/discord/callback`,
+        code: String(code), redirect_uri: redirectUri(req),
       }),
     });
     if (!tokenRes.ok) throw new Error(`token ${tokenRes.status}`);
@@ -117,7 +130,7 @@ app.get('/auth/discord/callback', async (req, res) => {
     const meRes = await fetch('https://discord.com/api/users/@me', { headers: { Authorization: `Bearer ${access_token}` } });
     if (!meRes.ok) throw new Error(`me ${meRes.status}`);
     const me = await meRes.json();
-    login(res, me);
+    login(req, res, me);
     res.redirect('/');
   } catch (e) {
     console.error('Discord login failed:', e.message);
@@ -125,11 +138,11 @@ app.get('/auth/discord/callback', async (req, res) => {
   }
 });
 
-function login(res, discordUser) {
+function login(req, res, discordUser) {
   R.upsertUser(discordUser);
   const token = randomBytes(32).toString('hex');
   R.createSession(token, discordUser.id, SESSION_TTL);
-  setCookie(res, 'sid', token, SESSION_TTL);
+  setCookie(req, res, 'sid', token, SESSION_TTL);
 }
 
 if (DEV_LOGIN) {
@@ -137,14 +150,14 @@ if (DEV_LOGIN) {
   app.get('/auth/dev', (req, res) => {
     const id = String(req.query.id || '');
     if (!/^\d{5,25}$/.test(id)) return res.status(400).send('Укажите ?id=<Discord ID>');
-    login(res, { id, username: `test_${id.slice(-4)}`, global_name: String(req.query.name || `Тест ${id.slice(-4)}`) });
+    login(req, res, { id, username: `test_${id.slice(-4)}`, global_name: String(req.query.name || `Тест ${id.slice(-4)}`) });
     res.redirect('/');
   });
 }
 
 app.post('/auth/logout', (req, res) => {
   if (req.sid) R.deleteSession(req.sid);
-  setCookie(res, 'sid', '', 0);
+  setCookie(req, res, 'sid', '', 0);
   res.json({ ok: true });
 });
 
@@ -165,7 +178,7 @@ app.get('/api/events', need('member'), (req, res) => {
 
 // ---------- чтение ----------
 app.get('/api/me', (req, res) => {
-  if (!req.userId) return res.json({ user: null, devLogin: DEV_LOGIN, discordConfigured: !!(CLIENT_ID && CLIENT_SECRET) });
+  if (!req.userId) return res.json({ user: null, devLogin: DEV_LOGIN, discordConfigured: !!(CLIENT_ID && CLIENT_SECRET), redirectUri: redirectUri(req) });
   const u = R.getUser(req.userId);
   res.json({
     user: { id: req.userId, username: u?.username, name: u?.global_name || u?.username, avatar: u?.avatar },
@@ -400,7 +413,7 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, HOST, () => {
-  console.log(`Farm Otdel: ${BASE_URL} (порт ${PORT})`);
+  console.log(`Farm Otdel: ${ENV_BASE || 'адрес берётся из запроса'} (порт ${PORT}, Node ${process.version}, база ${sqliteDriver}: ${DB_FILE})`);
   if (!CLIENT_ID || !CLIENT_SECRET) console.warn('Вход через Discord не настроен — см. README.md');
   if (!OWNER_IDS.length) console.warn('Не задан OWNER_DISCORD_IDS — некому будет выдавать доступы');
   if (!bot.enabled) console.warn('Не задан DISCORD_BOT_TOKEN — теги Discord подтягиваться не будут');

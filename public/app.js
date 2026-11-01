@@ -136,7 +136,9 @@ function renderLogin() {
     <div class="gate"><div class="gate-card">
       <span class="brand-mark">${LEAF}</span>
       <div><h1>Отдел Farm</h1><p>Учёт оплат, отпусков и штрафов</p></div>
-      ${failed ? '<p class="form-error">Не получилось войти через Discord. Попробуйте ещё раз.</p>' : ''}
+      ${failed ? `<p class="form-error">Не получилось войти через Discord. Попробуйте ещё раз.</p>
+        <p class="small">Если ошибка повторяется: в Discord Developer Portal → OAuth2 → Redirects должен быть ровно этот адрес:</p>
+        <div class="copy-line"><code>${esc(S.me.redirectUri)}</code><button class="btn sm" data-act="copy" data-text="${esc(S.me.redirectUri)}">Копировать</button></div>` : ''}
       ${S.me.discordConfigured
         ? '<a class="btn discord" href="/auth/discord">Войти через Discord</a>'
         : '<p class="form-error">Вход через Discord ещё не настроен на сервере (см. README.md).</p>'}
