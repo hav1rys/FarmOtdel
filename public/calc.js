@@ -7,21 +7,62 @@ export const DEFAULT_SETTINGS = {
   fineDays: 3, // сколько суток даётся на оплату штрафа
 };
 
-export const FINE_CATALOG = [
-  { code: '1.1', title: 'Не внесение ежедневного взноса', amount: 30000, sanction: '30 000$ + штрафной ранг' },
-  { code: '2.1', title: 'Игнорирование старшего состава отдела Farm', amount: 10000, sanction: '10 000$ + штрафной ранг' },
-  { code: '2.2', title: 'Пререкание со старшим составом отдела Farm', amount: 10000, sanction: '10 000$ + штрафной ранг' },
-  { code: '3.1', title: 'Активность в игре во время заявки в отпуск', amount: 15000, sanction: '15 000$ + штрафной ранг' },
-  { code: '4.1', title: 'Неявка на обязательное МП', amount: 20000, sanction: '20 000$ + штрафной ранг' },
-  { code: '5.1', title: 'Разжигание конфликта внутри отдела Farm', amount: 50000, sanction: '50 000$ / исключение из отдела / ЧС' },
-  { code: '5.2', title: 'Увольнение из отдела, не пробыв в нём 3 дней', amount: 15000, sanction: '15 000$ / ЧС' },
-  { code: 'other', title: 'Другое', amount: 0, sanction: '' },
-];
+// Плашки санкций. Вариант санкции — набор плашек, которые действуют вместе
+// («30 000$ + штрафной ранг»). У пункта может быть несколько вариантов на выбор
+// («50 000$ / исключение из отдела / ЧС») — при выдаче штрафа выбирается один.
+export const CHIP_TYPES = {
+  money: 'Сумма',
+  rank: 'Штрафной ранг',
+  kick: 'Исключение из отдела',
+  bl: 'ЧС',
+  text: 'Свой текст',
+};
+
+const money = (n) => `${Math.round(n || 0).toLocaleString('ru-RU')}$`;
+export function chipLabel(c) {
+  if (c.t === 'money') return money(c.amount);
+  if (c.t === 'text') return c.label || '';
+  return CHIP_TYPES[c.t] || '';
+}
+export const optionLabel = (opt) => opt.map(chipLabel).join(' + ');
+export const sanctionsLabel = (options) => options.map(optionLabel).join(' / ');
+export const optionAmount = (opt) => opt.filter((c) => c.t === 'money').reduce((s, c) => s + (c.amount || 0), 0);
+
+const M = (amount) => ({ t: 'money', amount });
+const RANK = { t: 'rank' };
+export const DEFAULT_RULES = {
+  categories: [
+    { id: 'c1', title: 'Ежедневный взнос', items: [
+      { code: '1.1', title: 'Невнесение ежедневного взноса', options: [[M(30000), RANK]], autoDays: 2 },
+    ] },
+    { id: 'c2', title: 'Старший состав', items: [
+      { code: '2.1', title: 'Игнорирование старшего состава отдела Farm', options: [[M(10000), RANK]], autoDays: 0 },
+      { code: '2.2', title: 'Пререкание со старшим составом отдела Farm', options: [[M(10000), RANK]], autoDays: 0 },
+    ] },
+    { id: 'c3', title: 'Выходной', items: [
+      { code: '3.1', title: 'Активность в игре во время оставленной заявки в отпуск', options: [[M(15000), RANK]], autoDays: 0 },
+    ] },
+    { id: 'c4', title: 'Посещаемость', items: [
+      { code: '4.1', title: 'Неявка на обязательное МП', options: [[M(20000), RANK]], autoDays: 0 },
+    ] },
+    { id: 'c5', title: 'Состав', items: [
+      { code: '5.1', title: 'Разжигание конфликта внутри отдела Farm', options: [[M(50000)], [{ t: 'kick' }], [{ t: 'bl' }]], autoDays: 0 },
+      { code: '5.2', title: 'Увольнение из отдела, не пробыв в нём 3 дней', options: [[M(15000)], [{ t: 'bl' }]], autoDays: 0 },
+    ] },
+  ],
+  notes: 'На оплату штрафов у вас есть 3 суток, иначе — ЧС.\nВсе штрафы оплачиваются исключительно на счёт фракции с отчётом в канале.',
+};
+
+export const allRuleItems = (rules) => rules.categories.flatMap((c) => c.items.map((i) => ({ ...i, category: c.title })));
+export const ruleByCode = (rules, code) => allRuleItems(rules).find((i) => i.code === code) || null;
+// Пункт, который выдаётся сам за неоплату взноса
+export const autoRules = (rules) => allRuleItems(rules).filter((i) => i.autoDays > 0);
 
 export const MEMBER_ROLES = {
   member: 'Участник',
-  head: 'Head Farm',
+  cur: 'Cur. Farm',
   dhead: 'D.Head Farm',
+  head: 'Head Farm',
 };
 
 // ---------- даты: храним как 'YYYY-MM-DD', считаем в днях от эпохи ----------
@@ -70,6 +111,14 @@ export function daysFor(amount, prices) {
   return best;
 }
 
+// Самая дешёвая оплата, которая закрывает не меньше n дней (5 дней = 55 000$, а 7 дней = 52 500$)
+export function minPayFor(n, prices) {
+  if (n <= 0) return { days: 0, cost: 0 };
+  let best = { days: n, cost: costFor(n, prices) };
+  if (n < 7 && costFor(7, prices) < best.cost) best = { days: 7, cost: costFor(7, prices) };
+  return best;
+}
+
 // ---------- состояние участника ----------
 
 export function memberState(member, records, settings, today) {
@@ -100,7 +149,8 @@ export function memberState(member, records, settings, today) {
   const totalPaid = pays.reduce((s, p) => s + (p.amount || 0), 0);
   const vacationNow = vacs.find((v) => today >= dayNum(v.start) && today < dayNum(v.start) + v.days) || null;
 
-  const unpaidFines = fines.filter((f) => !f.paid);
+  // Штраф без денежной части (например, только исключение) оплачивать не нужно
+  const unpaidFines = fines.filter((f) => !f.paid && f.amount > 0);
   const unpaidFinesSum = unpaidFines.reduce((s, f) => s + (f.amount || 0), 0);
   const overdueFines = unpaidFines.filter((f) => today > dayNum(f.date) + settings.fineDays);
 
@@ -108,21 +158,31 @@ export function memberState(member, records, settings, today) {
   const left = dayNum(member.left);
   const daysInDept = joined == null ? null : (left ?? today) - joined;
 
+  // С какого дня не оплачено: день окончания оплаты, а если оплат не было — день вступления
+  const dueSince = paidUntil ?? joined;
   let status;
   if (member.left) status = { key: 'left', label: 'Не в отделе' };
-  else if (member.role === 'head' || member.role === 'dhead') status = { key: 'staff', label: MEMBER_ROLES[member.role] };
+  else if (member.exempt) status = { key: 'exempt', label: 'Оплачено ∞' };
   else if (paidUntil == null) status = { key: 'unpaid', label: 'Не оплачено' };
   else if (paidUntil > today) status = { key: 'ok', label: 'Оплачено', daysLeft: paidUntil - today };
   else if (paidUntil === today) status = { key: 'today', label: 'Сегодня оплата' };
   else status = { key: 'due', label: 'Требуется оплата', overdue: today - paidUntil };
 
+  // Сколько внести, чтобы закрыть долг по сегодняшний день включительно
+  let owe = null;
+  if (['due', 'today', 'unpaid'].includes(status.key) && dueSince != null) {
+    const n = Math.max(1, today - dueSince + 1);
+    const pay = minPayFor(n, settings.prices);
+    owe = { since: dueSince, days: n, payDays: pay.days, amount: pay.cost + (pays.length ? 0 : settings.entryFee), withEntry: !pays.length };
+  }
+
   return {
     member, pays, vacs, fines, paidUntil, lastPay, totalPaid, vacationNow,
-    unpaidFines, unpaidFinesSum, overdueFines, daysInDept, status,
+    unpaidFines, unpaidFinesSum, overdueFines, daysInDept, status, dueSince, owe,
   };
 }
 
-const STATUS_ORDER = { due: 0, unpaid: 1, today: 2, ok: 3, staff: 4, left: 5 };
+const STATUS_ORDER = { due: 0, unpaid: 1, today: 2, ok: 3, exempt: 4, left: 5 };
 
 export function buildRoster(records, settings, today) {
   return records.members
@@ -132,6 +192,9 @@ export function buildRoster(records, settings, today) {
       (a.paidUntil ?? -1e9) - (b.paidUntil ?? -1e9) ||
       a.member.name.localeCompare(b.member.name));
 }
+
+// Чёрный список: действует, пока не наступила дата окончания (пустая — навсегда)
+export const blacklistActive = (b, today) => !b.until || dayNum(b.until) >= today;
 
 // ---------- отчёт за неделю (пн–вс) ----------
 

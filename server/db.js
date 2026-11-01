@@ -1,6 +1,6 @@
 import { mkdirSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { DEFAULT_SETTINGS } from '../public/calc.js';
+import { DEFAULT_SETTINGS, DEFAULT_RULES } from '../public/calc.js';
 
 // SQLite: встроенный в Node 22.13+ модуль, а на более старом Node (например, 20 у хостинга) — пакет better-sqlite3.
 // API у них совпадает в том, что мы используем: exec, prepare().run/get/all.
@@ -90,6 +90,20 @@ export function openDb(file) {
       discord_id TEXT NOT NULL,
       expires_at INTEGER NOT NULL
     );
+    -- Чёрный список отдела: по Discord ID, может быть и не участником
+    CREATE TABLE IF NOT EXISTS blacklist (
+      id TEXT PRIMARY KEY,
+      discord TEXT,
+      name TEXT NOT NULL,
+      reason TEXT NOT NULL DEFAULT '',
+      date TEXT NOT NULL,
+      until TEXT,
+      member_id TEXT,
+      fine_id TEXT,
+      discord_tag TEXT,
+      created_by TEXT,
+      created_at TEXT NOT NULL
+    );
     CREATE TABLE IF NOT EXISTS audit (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       at TEXT NOT NULL,
@@ -99,11 +113,16 @@ export function openDb(file) {
     );
   `);
 
-  // Данные из Discord, которые подтягивает бот
-  const cols = db.prepare('PRAGMA table_info(members)').all().map((c) => c.name);
-  for (const [col, type] of [['discord_tag', 'TEXT'], ['discord_name', 'TEXT'], ['discord_avatar', 'TEXT'], ['discord_checked_at', 'TEXT'], ['discord_missing', 'INTEGER NOT NULL DEFAULT 0']]) {
-    if (!cols.includes(col)) db.exec(`ALTER TABLE members ADD COLUMN ${col} ${type}`);
-  }
+  // Новые поля в уже созданных базах
+  const addCols = (table, list) => {
+    const cols = db.prepare(`PRAGMA table_info(${table})`).all().map((c) => c.name);
+    for (const [col, type] of list) if (!cols.includes(col)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${col} ${type}`);
+  };
+  // Данные из Discord, которые подтягивает бот; exempt — не платит взнос (бессрочно)
+  addCols('members', [['discord_tag', 'TEXT'], ['discord_name', 'TEXT'], ['discord_avatar', 'TEXT'], ['discord_checked_at', 'TEXT'],
+    ['discord_missing', 'INTEGER NOT NULL DEFAULT 0'], ['exempt', 'INTEGER NOT NULL DEFAULT 0']]);
+  // Название пункта и выбранные плашки санкции сохраняются в штрафе: правила потом могут поменяться
+  addCols('fines', [['title', "TEXT NOT NULL DEFAULT ''"], ['sanctions', "TEXT NOT NULL DEFAULT '[]'"], ['auto', 'INTEGER NOT NULL DEFAULT 0']]);
   return db;
 }
 
@@ -113,10 +132,18 @@ export const rowTo = {
   member: (r) => ({
     id: r.id, name: r.name, discord: r.discord || '', role: r.role, joined: r.joined, left: r.left_at, note: r.note,
     discordTag: r.discord_tag || '', discordName: r.discord_name || '', discordAvatar: r.discord_avatar || '', discordMissing: !!r.discord_missing,
+    exempt: !!r.exempt,
   }),
   payment: (r) => ({ id: r.id, memberId: r.member_id, date: r.date, amount: r.amount, entry: r.entry, days: r.days, note: r.note }),
   vacation: (r) => ({ id: r.id, memberId: r.member_id, start: r.start, days: r.days, note: r.note }),
-  fine: (r) => ({ id: r.id, memberId: r.member_id, date: r.date, code: r.code, amount: r.amount, paid: !!r.paid, paidDate: r.paid_date, note: r.note }),
+  fine: (r) => ({
+    id: r.id, memberId: r.member_id, date: r.date, code: r.code, title: r.title || '', sanctions: JSON.parse(r.sanctions || '[]'),
+    amount: r.amount, paid: !!r.paid, paidDate: r.paid_date, note: r.note, auto: !!r.auto,
+  }),
+  blacklist: (r) => ({
+    id: r.id, discord: r.discord || '', name: r.name, reason: r.reason, date: r.date, until: r.until,
+    memberId: r.member_id, fineId: r.fine_id, discordTag: r.discord_tag || '',
+  }),
 };
 
 export function repo(db) {
@@ -128,27 +155,32 @@ export function repo(db) {
         payments: q('SELECT * FROM payments ORDER BY date').all().map(rowTo.payment),
         vacations: q('SELECT * FROM vacations ORDER BY start').all().map(rowTo.vacation),
         fines: q('SELECT * FROM fines ORDER BY date').all().map(rowTo.fine),
+        blacklist: q('SELECT * FROM blacklist ORDER BY date DESC').all().map(rowTo.blacklist),
       };
     },
     getSettings() {
       const row = q("SELECT value FROM settings WHERE key = 'main'").get();
-      return { ...DEFAULT_SETTINGS, ...(row ? JSON.parse(row.value) : {}) };
+      const rules = q("SELECT value FROM settings WHERE key = 'rules'").get();
+      return { ...DEFAULT_SETTINGS, ...(row ? JSON.parse(row.value) : {}), rules: rules ? JSON.parse(rules.value) : DEFAULT_RULES };
     },
-    setSettings(s) {
+    setRules(rules) {
+      q("INSERT INTO settings (key, value) VALUES ('rules', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(rules));
+    },
+    setSettings({ rules, ...s }) {
       q("INSERT INTO settings (key, value) VALUES ('main', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value").run(JSON.stringify(s));
     },
 
     upsertMember(m, actor) {
-      q(`INSERT INTO members (id, name, discord, role, joined, left_at, note, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      q(`INSERT INTO members (id, name, discord, role, joined, left_at, note, exempt, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET name = excluded.name, discord = excluded.discord, role = excluded.role,
-           joined = excluded.joined, left_at = excluded.left_at, note = excluded.note,
+           joined = excluded.joined, left_at = excluded.left_at, note = excluded.note, exempt = excluded.exempt,
            -- сменился Discord ID — старый тег больше не верен
            discord_tag = CASE WHEN members.discord IS excluded.discord THEN members.discord_tag END,
            discord_name = CASE WHEN members.discord IS excluded.discord THEN members.discord_name END,
            discord_avatar = CASE WHEN members.discord IS excluded.discord THEN members.discord_avatar END,
            discord_checked_at = CASE WHEN members.discord IS excluded.discord THEN members.discord_checked_at END,
            discord_missing = CASE WHEN members.discord IS excluded.discord THEN members.discord_missing ELSE 0 END`)
-        .run(m.id, m.name, m.discord || null, m.role, m.joined || null, m.left || null, m.note || '', now());
+        .run(m.id, m.name, m.discord || null, m.role, m.joined || null, m.left || null, m.note || '', m.exempt ? 1 : 0, now());
     },
     setMemberDiscordInfo(id, info) {
       q(`UPDATE members SET discord_tag = ?, discord_name = ?, discord_avatar = ?, discord_missing = ?, discord_checked_at = ? WHERE id = ?`)
@@ -172,18 +204,35 @@ export function repo(db) {
         .run(v.id, v.memberId, v.start, v.days, v.note || '', actor, now());
     },
     upsertFine(f, actor) {
-      q(`INSERT INTO fines (id, member_id, date, code, amount, paid, paid_date, note, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      q(`INSERT INTO fines (id, member_id, date, code, title, sanctions, amount, paid, paid_date, note, auto, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(id) DO UPDATE SET member_id = excluded.member_id, date = excluded.date, code = excluded.code,
-           amount = excluded.amount, paid = excluded.paid, paid_date = excluded.paid_date, note = excluded.note`)
-        .run(f.id, f.memberId, f.date, f.code, f.amount, f.paid ? 1 : 0, f.paidDate || null, f.note || '', actor, now());
+           title = excluded.title, sanctions = excluded.sanctions, amount = excluded.amount, paid = excluded.paid,
+           paid_date = excluded.paid_date, note = excluded.note`)
+        .run(f.id, f.memberId, f.date, f.code, f.title || '', JSON.stringify(f.sanctions || []), f.amount, f.paid ? 1 : 0,
+          f.paidDate || null, f.note || '', f.auto ? 1 : 0, actor, now());
+    },
+    upsertBlacklist(b, actor) {
+      q(`INSERT INTO blacklist (id, discord, name, reason, date, until, member_id, fine_id, created_by, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET discord = excluded.discord, name = excluded.name, reason = excluded.reason,
+           date = excluded.date, until = excluded.until, member_id = excluded.member_id,
+           discord_tag = CASE WHEN blacklist.discord IS excluded.discord THEN blacklist.discord_tag END`)
+        .run(b.id, b.discord || null, b.name, b.reason || '', b.date, b.until || null, b.memberId || null, b.fineId || null, actor, now());
+    },
+    setBlacklistTag(id, tag) {
+      q('UPDATE blacklist SET discord_tag = ? WHERE id = ?').run(tag || null, id);
+    },
+    // Есть ли уже штраф по этому пункту, выданный в этот же долг (не раньше даты, с которой не оплачено)
+    hasFineSince(memberId, code, sinceIso) {
+      return !!q('SELECT 1 FROM fines WHERE member_id = ? AND code = ? AND date >= ? LIMIT 1').get(memberId, code, sinceIso);
     },
     remove(table, id) {
-      const allowed = { members: 1, payments: 1, vacations: 1, fines: 1 };
+      const allowed = { members: 1, payments: 1, vacations: 1, fines: 1, blacklist: 1 };
       if (!allowed[table]) throw new Error('bad table');
       return q(`DELETE FROM ${table} WHERE id = ?`).run(id).changes > 0;
     },
     get(table, id) {
-      const map = { members: rowTo.member, payments: rowTo.payment, vacations: rowTo.vacation, fines: rowTo.fine };
+      const map = { members: rowTo.member, payments: rowTo.payment, vacations: rowTo.vacation, fines: rowTo.fine, blacklist: rowTo.blacklist };
       const r = q(`SELECT * FROM ${table} WHERE id = ?`).get(id);
       return r ? map[table](r) : null;
     },
@@ -235,9 +284,19 @@ export function repo(db) {
     log(actor, action, summary) {
       q('INSERT INTO audit (at, actor_id, action, summary) VALUES (?, ?, ?, ?)').run(now(), actor, action, summary);
     },
-    listAudit(limit = 200) {
-      return q(`SELECT a.*, u.username, u.global_name FROM audit a LEFT JOIN users u ON u.discord_id = a.actor_id
-                ORDER BY a.id DESC LIMIT ?`).all(limit);
+    listAudit(limit = 300) {
+      return {
+        total: q('SELECT COUNT(*) AS n FROM audit').get().n,
+        rows: q(`SELECT a.*, u.username, u.global_name FROM audit a LEFT JOIN users u ON u.discord_id = a.actor_id
+                 ORDER BY a.id DESC LIMIT ?`).all(limit),
+      };
+    },
+    deleteAudit(id) {
+      return q('DELETE FROM audit WHERE id = ?').run(id).changes;
+    },
+    // Удалить записи журнала старше даты (или все, если даты нет)
+    clearAudit(beforeIso) {
+      return beforeIso ? q('DELETE FROM audit WHERE at < ?').run(beforeIso).changes : q('DELETE FROM audit').run().changes;
     },
     memberByDiscord(discordId) {
       const r = q('SELECT * FROM members WHERE discord = ? ORDER BY left_at IS NOT NULL, joined DESC LIMIT 1').get(discordId);

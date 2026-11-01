@@ -12,7 +12,8 @@
     "dev": "node --disable-warning=ExperimentalWarning --watch server/index.js"
   },
   "dependencies": {
-    "express": "^4.22.3"
+    "express": "^4.22.3",
+    "html2canvas": "^1.4.1"
   },
   "optionalDependencies": {
     "better-sqlite3": "^12.11.1"

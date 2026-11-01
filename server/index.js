@@ -5,13 +5,19 @@ import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { openDb, repo, sqliteDriver } from './db.js';
 import { createDiscordBot } from './discord-bot.js';
-import { DEFAULT_SETTINGS, FINE_CATALOG, MEMBER_ROLES, isIsoDate, daysFor } from '../public/calc.js';
+import {
+  DEFAULT_SETTINGS, CHIP_TYPES, MEMBER_ROLES, isIsoDate, daysFor, ruleByCode, autoRules, optionAmount,
+  memberState, todayNum, isoOf,
+} from '../public/calc.js';
 
 const root = join(dirname(fileURLToPath(import.meta.url)), '..');
 if (existsSync(join(root, '.env'))) process.loadEnvFile(join(root, '.env'));
+// «Сегодня» считаем по московскому времени, даже если сервер хостинга живёт в UTC
+process.env.TZ ||= 'Europe/Moscow';
 
 const PORT = Number(process.env.PORT || 3000);
-const HOST = process.env.HOST || undefined;
+// Только IPv4, как у работающих на Bothost ботов: сам Bothost занимает этот порт по IPv6
+const HOST = process.env.HOST || '0.0.0.0';
 // Адрес сайта: BASE_URL, иначе DOMAIN, иначе берётся из самого запроса
 // (на Bothost переменных окружения не больше пяти, поэтому адрес можно не задавать)
 const ENV_BASE = (process.env.BASE_URL || (process.env.DOMAIN ? `https://${process.env.DOMAIN}` : '')).replace(/\/$/, '');
@@ -227,12 +233,57 @@ const discordId = (v, optional = true) => {
   return s;
 };
 
+// Плашки одного варианта санкции
+const chips = (arr) => {
+  if (!Array.isArray(arr) || arr.length > 6) throw new Bad('Неверные плашки санкции');
+  return arr.map((c) => {
+    if (!c || !CHIP_TYPES[c.t]) throw new Bad('Неизвестная плашка санкции');
+    if (c.t === 'money') return { t: 'money', amount: int(c.amount, 'сумма в санкции', 0) };
+    if (c.t === 'text') {
+      const label = str(c.label, 60);
+      if (!label) throw new Bad('Пустая плашка с текстом');
+      return { t: 'text', label };
+    }
+    return { t: c.t };
+  });
+};
+
+function validRules(b) {
+  if (!Array.isArray(b?.categories) || b.categories.length > 30) throw new Bad('Неверный формат правил');
+  const codes = new Set();
+  const categories = b.categories.map((c) => {
+    const title = str(c.title, 100);
+    if (!title) throw new Bad('У категории нет названия');
+    if (!Array.isArray(c.items) || c.items.length > 60) throw new Bad('Неверный список пунктов');
+    return {
+      id: str(c.id, 40) || randomUUID(),
+      title,
+      items: c.items.map((i) => {
+        const code = str(i.code, 12);
+        if (!code) throw new Bad('У пункта нет номера');
+        if (codes.has(code)) throw new Bad(`Номер пункта ${code} повторяется`);
+        codes.add(code);
+        const itemTitle = str(i.title, 300);
+        if (!itemTitle) throw new Bad(`У пункта ${code} нет описания`);
+        if (!Array.isArray(i.options) || i.options.length > 6) throw new Bad(`Неверные санкции у пункта ${code}`);
+        const options = i.options.map(chips).filter((o) => o.length);
+        if (!options.length) throw new Bad(`У пункта ${code} нужна хотя бы одна санкция`);
+        return { code, title: itemTitle, options, autoDays: int(i.autoDays ?? 0, 'дни до автоштрафа', 0, 60) };
+      }),
+    };
+  });
+  return { categories, notes: str(b.notes, 3000) };
+}
+
 const validators = {
   members: (b, id) => {
     const role = MEMBER_ROLES[b.role] ? b.role : 'member';
     const name = str(b.name, 80);
     if (!name) throw new Bad('Укажите имя');
-    return { id, name, discord: discordId(b.discord), role, joined: date(b.joined, 'вступил', true), left: date(b.left, 'уволился', true), note: str(b.note, 500) };
+    return {
+      id, name, discord: discordId(b.discord), role, joined: date(b.joined, 'вступил', true), left: date(b.left, 'уволился', true),
+      note: str(b.note, 500), exempt: !!b.exempt,
+    };
   },
   payments: (b, id) => {
     const amount = int(b.amount, 'сумма', 0);
@@ -242,20 +293,37 @@ const validators = {
   },
   vacations: (b, id) => ({ id, memberId: memberRef(b.memberId), start: date(b.start, 'начало'), days: int(b.days, 'дней', 1, 365), note: str(b.note, 500) }),
   fines: (b, id) => {
-    const code = FINE_CATALOG.some((f) => f.code === b.code) ? b.code : 'other';
+    const code = str(b.code, 12) || 'other';
+    const rule = ruleByCode(R.getSettings().rules, code);
     const paid = !!b.paid;
-    return { id, memberId: memberRef(b.memberId), date: date(b.date, 'дата'), code, amount: int(b.amount, 'сумма'), paid, paidDate: paid ? date(b.paidDate, 'дата оплаты') : null, note: str(b.note, 500) };
+    return {
+      id, memberId: memberRef(b.memberId), date: date(b.date, 'дата'), code, title: str(b.title, 300) || rule?.title || 'Штраф',
+      sanctions: chips(b.sanctions ?? []), amount: int(b.amount, 'сумма'), paid, paidDate: paid ? date(b.paidDate, 'дата оплаты') : null,
+      note: str(b.note, 500),
+    };
+  },
+  blacklist: (b, id) => {
+    const memberId = b.memberId ? memberRef(b.memberId) : null;
+    const m = memberId ? R.get('members', memberId) : null;
+    const discord = discordId(b.discord || m?.discord || '');
+    const name = str(b.name, 80) || m?.name || '';
+    if (!name && !discord) throw new Bad('Укажите имя или Discord ID');
+    const d = date(b.date, 'дата');
+    const until = date(b.until, 'до', true);
+    if (until && until < d) throw new Bad('Дата окончания раньше даты занесения');
+    return { id, discord, name: name || discord, reason: str(b.reason, 300), date: d, until, memberId, fineId: str(b.fineId, 60) || null };
   },
 };
-const upserts = { members: 'upsertMember', payments: 'upsertPayment', vacations: 'upsertVacation', fines: 'upsertFine' };
-const labels = { members: 'участник', payments: 'оплата', vacations: 'отпуск', fines: 'штраф' };
+const upserts = { members: 'upsertMember', payments: 'upsertPayment', vacations: 'upsertVacation', fines: 'upsertFine', blacklist: 'upsertBlacklist' };
+const labels = { members: 'участник', payments: 'оплата', vacations: 'отпуск', fines: 'штраф', blacklist: 'ЧС' };
 
 function describe(table, rec) {
   const m = rec.memberId ? R.get('members', rec.memberId) : rec;
   const who = m?.name || '?';
   if (table === 'payments') return `${who}: ${rec.amount.toLocaleString('ru-RU')}$ за ${rec.days} дн. (${rec.date})`;
   if (table === 'vacations') return `${who}: отпуск ${rec.days} дн. с ${rec.start}`;
-  if (table === 'fines') return `${who}: штраф ${rec.code}, ${rec.amount.toLocaleString('ru-RU')}$${rec.paid ? ' (оплачен)' : ''}`;
+  if (table === 'fines') return `${who}: штраф ${rec.code === 'other' ? '' : rec.code + ' '}«${rec.title}», ${rec.amount.toLocaleString('ru-RU')}$${rec.paid ? ' (оплачен)' : ''}`;
+  if (table === 'blacklist') return `${rec.name}${rec.discord ? ` (${rec.discord})` : ''}: ${rec.reason || 'без причины'}${rec.until ? `, до ${rec.until}` : ', навсегда'}`;
   return who;
 }
 
@@ -268,10 +336,12 @@ for (const table of Object.keys(validators)) {
       const rec = validators[table](req.body || {}, id);
       R[upserts[table]](rec, req.userId);
       R.log(req.userId, `${isNew ? 'Добавлено' : 'Изменено'}: ${labels[table]}`, describe(table, rec));
+      if (table === 'fines' && isNew) applyFineSanctions(rec, req.body || {}, req.userId);
       changed();
       res.json(rec);
       // Новый или сменённый Discord ID — бот подтягивает тег в фоне, страницы обновятся сами
       if (table === 'members' && rec.discord && (!prev || prev.discord !== rec.discord || !prev.discordTag)) refreshDiscord(rec.id);
+      if (table === 'blacklist' && rec.discord && (!prev || prev.discord !== rec.discord)) refreshBlacklistTag(rec.id);
     } catch (e) {
       if (e instanceof Bad) return res.status(400).json({ error: e.message });
       throw e;
@@ -290,7 +360,71 @@ for (const table of Object.keys(validators)) {
   });
 }
 
+// Плашки «ЧС» и «Исключение из отдела» в выбранной санкции сразу применяются, если их отметили в форме
+function applyFineSanctions(fine, body, actor) {
+  const m = R.get('members', fine.memberId);
+  if (!m) return;
+  if (body.addBlacklist && fine.sanctions.some((c) => c.t === 'bl')) {
+    const entry = {
+      id: randomUUID(), discord: m.discord, name: m.name, reason: `Штраф ${fine.code === 'other' ? '' : fine.code + ' '}«${fine.title}»`,
+      date: fine.date, until: null, memberId: m.id, fineId: fine.id,
+    };
+    R.upsertBlacklist(entry, actor);
+    R.log(actor, 'Добавлено: ЧС', describe('blacklist', entry));
+    if (m.discord) refreshBlacklistTag(entry.id);
+  }
+  if (body.kick && fine.sanctions.some((c) => c.t === 'kick') && !m.left) {
+    R.upsertMember({ ...m, left: fine.date }, actor);
+    R.log(actor, 'Изменено: участник', `${m.name}: исключён из отдела ${fine.date}`);
+  }
+}
+
+// ---------- автоштрафы ----------
+// Пункты правил с «автоштрафом через N дн.» выдаются сами, если человек не оплатил взнос N дней.
+// Один автоштраф на один долг: повторно — только после новой оплаты и новой просрочки.
+function runAutoFines() {
+  const settings = R.getSettings();
+  const rules = autoRules(settings.rules);
+  if (!rules.length) return;
+  const records = R.allRecords();
+  const today = todayNum();
+  let created = 0;
+  for (const m of records.members) {
+    if (m.left || m.exempt) continue;
+    const st = memberState(m, records, settings, today);
+    if (st.dueSince == null || !['due', 'today', 'unpaid'].includes(st.status.key)) continue;
+    for (const rule of rules) {
+      const fireDay = st.dueSince + rule.autoDays;
+      if (today < fireDay || R.hasFineSince(m.id, rule.code, isoOf(st.dueSince))) continue;
+      const opt = rule.options[0];
+      const fine = {
+        id: randomUUID(), memberId: m.id, date: isoOf(fireDay), code: rule.code, title: rule.title, sanctions: opt,
+        amount: optionAmount(opt), paid: false, paidDate: null, auto: true,
+        note: `Выдан автоматически: не оплачено с ${isoOf(st.dueSince).split('-').reverse().join('.')}`,
+      };
+      R.upsertFine(fine, null);
+      R.log(null, 'Автоштраф', describe('fines', fine));
+      created += 1;
+    }
+  }
+  if (created) changed();
+}
+setTimeout(runAutoFines, 8000);
+setInterval(runAutoFines, 30 * 60 * 1000);
+
 // ---------- бот: теги Discord ----------
+async function refreshBlacklistTag(id) {
+  if (!bot.enabled) return;
+  const b = R.get('blacklist', id);
+  if (!b?.discord) return;
+  try {
+    const info = await bot.lookup(b.discord);
+    if (R.get('blacklist', id)?.discord === b.discord) { R.setBlacklistTag(id, info?.tag || null); changed(); }
+  } catch (e) {
+    console.error(`Бот: не удалось получить тег ${b.discord}:`, e.message);
+  }
+}
+
 async function refreshDiscord(memberId) {
   if (!bot.enabled) return;
   const m = R.get('members', memberId);
@@ -349,11 +483,30 @@ app.put('/api/settings', need('admin'), (req, res) => {
     const b = req.body || {};
     const prices = Array.isArray(b.prices) && b.prices.length === 7 ? b.prices.map((p, i) => int(p, `цена ${i + 1}`, 1)) : null;
     if (!prices) throw new Bad('Нужно 7 цен');
-    const s = { prices, entryFee: int(b.entryFee ?? DEFAULT_SETTINGS.entryFee, 'вступительный', 0), fineDays: int(b.fineDays ?? DEFAULT_SETTINGS.fineDays, 'срок штрафа', 0, 60) };
+    const cur = R.getSettings();
+    const s = { prices, entryFee: int(b.entryFee ?? DEFAULT_SETTINGS.entryFee, 'вступительный', 0), fineDays: cur.fineDays };
     R.setSettings(s);
-    R.log(req.userId, 'Изменены цены', `Цены: ${prices.join(' / ')}, вступительный ${s.entryFee}, срок штрафа ${s.fineDays} сут.`);
+    R.log(req.userId, 'Изменены цены', `Цены: ${prices.join(' / ')}, вступительный ${s.entryFee}`);
     changed();
     res.json(s);
+  } catch (e) {
+    if (e instanceof Bad) return res.status(400).json({ error: e.message });
+    throw e;
+  }
+});
+
+// Правила (система штрафов) и срок оплаты штрафа
+app.put('/api/rules', need('admin'), (req, res) => {
+  try {
+    const rules = validRules(req.body?.rules);
+    const { rules: _old, ...cur } = R.getSettings();
+    const fineDays = int(req.body?.fineDays ?? cur.fineDays, 'срок оплаты штрафа', 0, 60);
+    R.setRules(rules);
+    R.setSettings({ ...cur, fineDays });
+    R.log(req.userId, 'Изменены правила', `Пунктов: ${rules.categories.reduce((n, c) => n + c.items.length, 0)}, срок оплаты штрафа ${fineDays} сут.`);
+    changed();
+    setTimeout(runAutoFines, 500);
+    res.json({ rules, fineDays });
   } catch (e) {
     if (e instanceof Bad) return res.status(400).json({ error: e.message });
     throw e;
@@ -404,17 +557,45 @@ app.delete('/api/access/:discordId', need('admin'), (req, res) => {
 
 app.get('/api/audit', need('admin'), (req, res) => res.json(R.listAudit()));
 
+// Чистка журнала — только владелец
+app.delete('/api/audit/:id', need('owner'), (req, res) => {
+  R.deleteAudit(Number(req.params.id));
+  changed();
+  res.json({ ok: true });
+});
+app.delete('/api/audit', need('owner'), (req, res) => {
+  const days = req.query.olderThanDays ? int(Number(req.query.olderThanDays), 'дней', 1, 3650) : null;
+  const before = days ? new Date(Date.now() - days * 86400000).toISOString() : null;
+  const removed = R.clearAudit(before);
+  R.log(req.userId, 'Очищен журнал', days ? `Удалено записей старше ${days} дн.: ${removed}` : `Удалено записей: ${removed}`);
+  changed();
+  res.json({ removed });
+});
+
 // ---------- страница ----------
 app.use(express.static(join(root, 'public'), { extensions: ['html'] }));
+// Библиотека для кнопки «Скриншот» — отдаём со своего сайта, без сторонних CDN
+app.get('/vendor/html2canvas.min.js', (req, res) => res.sendFile(join(root, 'node_modules', 'html2canvas', 'dist', 'html2canvas.min.js')));
 
 app.use((err, req, res, next) => {
   console.error(err);
   res.status(500).json({ error: 'Ошибка сервера' });
 });
 
-app.listen(PORT, HOST, () => {
-  console.log(`Farm Otdel: ${ENV_BASE || 'адрес берётся из запроса'} (порт ${PORT}, Node ${process.version}, база ${sqliteDriver}: ${DB_FILE})`);
-  if (!CLIENT_ID || !CLIENT_SECRET) console.warn('Вход через Discord не настроен — см. README.md');
-  if (!OWNER_IDS.length) console.warn('Не задан OWNER_DISCORD_IDS — некому будет выдавать доступы');
-  if (!bot.enabled) console.warn('Не задан DISCORD_BOT_TOKEN — теги Discord подтягиваться не будут');
-});
+// Порт может быть ещё занят (например, предыдущей копией при перезапуске) — ждём, а не падаем
+let busyTries = 0;
+function listen() {
+  const server = app.listen(PORT, HOST, () => {
+    console.log(`Farm Otdel: ${ENV_BASE || 'адрес берётся из запроса'} (${HOST}:${PORT}, Node ${process.version}, база ${sqliteDriver}: ${DB_FILE})`);
+    if (!CLIENT_ID || !CLIENT_SECRET) console.warn('Вход через Discord не настроен — см. README.md');
+    if (!OWNER_IDS.length) console.warn('Не задан OWNER_DISCORD_IDS — некому будет выдавать доступы');
+    if (!bot.enabled) console.warn('Не задан DISCORD_BOT_TOKEN — теги Discord подтягиваться не будут');
+  });
+  server.on('error', (err) => {
+    if (err.code !== 'EADDRINUSE') throw err;
+    busyTries += 1;
+    if (busyTries === 1 || busyTries % 12 === 0) console.error(`Порт ${HOST}:${PORT} занят другим процессом, повторю через 5 с (попытка ${busyTries})`);
+    setTimeout(listen, 5000);
+  });
+}
+listen();

@@ -144,7 +144,64 @@ tr.is-left td { color: var(--muted); }
 .pill.ok { background: var(--ok-bg); color: var(--ok); }
 .pill.today { background: var(--warn-bg); color: var(--warn); }
 .pill.due, .pill.unpaid, .pill.bad { background: var(--bad-bg); color: var(--bad); }
-.pill.staff { background: var(--info-bg); color: var(--info); }
+.pill.staff, .pill.exempt { background: var(--info-bg); color: var(--info); }
+.who .role { font-family: var(--f-mono); font-size: .7rem; font-weight: 500; color: var(--info); background: var(--info-bg); border-radius: 5px; padding: 1px 6px; margin-left: 4px; white-space: nowrap; }
+.owe { margin-top: 3px; }
+
+/* ---------- пояснения ---------- */
+.explain { background: var(--surface-2); border: 1px solid var(--line); border-radius: var(--r); padding: 10px 14px; margin-bottom: 12px; font-size: .9rem; color: var(--muted); max-width: 90ch; }
+.explain b { color: var(--ink); font-weight: 600; }
+
+/* ---------- плашки санкций ---------- */
+.chips { display: inline-flex; flex-wrap: wrap; gap: 4px; vertical-align: middle; }
+.chip { display: inline-flex; align-items: center; gap: 4px; font-size: .78rem; font-weight: 500; padding: 2px 9px; border-radius: 6px; border: 1px solid var(--line); background: var(--surface); white-space: nowrap; }
+.chip-money { font-family: var(--f-mono); background: var(--warn-bg); color: var(--warn); border-color: transparent; }
+.chip-rank { background: var(--info-bg); color: var(--info); border-color: transparent; }
+.chip-kick { background: var(--idle-bg); color: var(--ink); border-color: transparent; }
+.chip-bl { background: var(--bad-bg); color: var(--bad); border-color: transparent; }
+.or { font-size: .72rem; color: var(--muted); text-transform: uppercase; letter-spacing: .05em; margin: 0 6px; }
+.chip-x { border: 0; background: none; color: inherit; cursor: pointer; padding: 0 0 0 2px; font-size: 1rem; line-height: 1; opacity: .7; }
+.chip-x:hover { opacity: 1; }
+
+/* выбор варианта санкции при выдаче штрафа */
+.opt-list { display: grid; gap: 6px; }
+.opt { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border: 1px solid var(--line); border-radius: 8px; cursor: pointer; color: var(--ink); }
+.opt input { accent-color: var(--accent); }
+.opt.on { border-color: var(--accent); background: var(--accent-soft); }
+
+/* редактор пункта правил */
+.opt-edit-list { display: grid; gap: 8px; }
+.opt-edit { border: 1px dashed var(--line); border-radius: 8px; padding: 10px; display: grid; gap: 8px; color: var(--ink); }
+.opt-edit-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+.chip-add { display: flex; flex-wrap: wrap; gap: 6px; }
+.chip-add select, .chip-add input { background: var(--surface); border: 1px solid var(--line); border-radius: 8px; padding: 5px 8px; color: var(--ink); font-size: .88rem; min-width: 0; }
+.chip-add input { width: 120px; }
+
+/* ---------- правила ---------- */
+.rules-cols { grid-template-columns: minmax(280px, 1fr) minmax(300px, 1.6fr); }
+.rule-cat { display: grid; gap: 4px; }
+.rule-cat + .rule-cat { border-top: 1px solid var(--line); padding-top: 10px; }
+.rule-cat-head { display: flex; justify-content: space-between; align-items: center; gap: 8px; flex-wrap: wrap; }
+.rule-cat-head h3 { font-size: .95rem; }
+.rule-item { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: start; padding: 6px 0 6px 4px; }
+.rule-item .tag { margin-top: 2px; }
+.rule-body { display: grid; gap: 5px; min-width: 0; }
+.rule-sanctions { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; }
+.rule-notes { border-top: 1px solid var(--line); padding-top: 10px; display: grid; gap: 6px; font-size: .9rem; }
+.rule-notes p { margin: 0; }
+.modal.wide { width: min(640px, 100%); }
+
+/* ---------- скриншот: собирается вне экрана с фиксированной шириной ---------- */
+.shot { position: absolute; left: -10000px; top: 0; width: 1120px; padding: 24px; background: var(--bg); color: var(--ink); display: grid; gap: 16px; font: 15px/1.5 var(--f-body); }
+.shot-head { display: flex; align-items: center; gap: 14px; }
+.shot-head .brand-mark { width: 44px; height: 44px; border-radius: 11px; }
+.shot-head h1 { font-size: 1.45rem; }
+.shot-sub { font-family: var(--f-mono); font-size: .85rem; color: var(--muted); }
+.shot .who .tag-at { font-size: .82rem; }
+.shot .who b, .shot td.num { white-space: nowrap; }
+.shot-preview { max-height: 60vh; overflow: auto; border: 1px solid var(--line); border-radius: 10px; background: var(--surface-2); display: grid; place-items: center; min-height: 120px; }
+.shot-preview img { display: block; width: 100%; height: auto; }
+@media (max-width: 800px) { .rules-cols { grid-template-columns: minmax(0, 1fr); } }
 .pill.left, .pill.idle { background: var(--idle-bg); color: var(--idle); }
 .pill.vac { background: var(--info-bg); color: var(--info); }
 .pill.warn { background: var(--warn-bg); color: var(--warn); }
