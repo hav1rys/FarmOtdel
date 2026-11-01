@@ -1,0 +1,21 @@
+[Unit]
+Description=Farm Otdel website
+After=network.target
+
+[Service]
+Type=simple
+User=farm
+Group=farm
+WorkingDirectory=/opt/farm-otdel
+ExecStart=/usr/bin/node --disable-warning=ExperimentalWarning server/index.js
+Restart=always
+RestartSec=3
+Environment=NODE_ENV=production
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/opt/farm-otdel/data
+
+[Install]
+WantedBy=multi-user.target
